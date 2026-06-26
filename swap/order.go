@@ -8,6 +8,7 @@ import (
 	"github.com/orchidknight/swapper/models"
 )
 
+// ConsumeOrder starts a swap order and returns the first market suborder to execute.
 func (s *Swapper) ConsumeOrder(ctx context.Context, order *models.Order) (*models.SwapperReport, error) {
 	if order.Side == models.SideBuy {
 		order.Reject(models.RejectReasonBuySwapsNotSupported)

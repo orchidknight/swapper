@@ -1,21 +1,54 @@
 package models
 
 import (
-	"crypto/rand"
-	"encoding/binary"
+	"sync"
 	"time"
 )
 
+const (
+	idSequenceBits  = 16
+	idSequenceMask  = 1<<idSequenceBits - 1
+	idTimestampMask = 1<<(64-idSequenceBits) - 1
+)
+
+var newIDState struct {
+	mu        sync.Mutex
+	lastMilli uint64
+	sequence  uint64
+}
+
+// NewID returns a process-local unique uint64 ID.
+//
+// Layout: high 48 bits are logical Unix milliseconds, low 16 bits are a
+// per-millisecond sequence. This gives 65,536 IDs per logical millisecond with
+// zero collision probability inside one process. If this limit is reached before
+// the wall clock advances, the logical millisecond is advanced to preserve
+// uniqueness, so generated IDs may briefly run ahead of wall time.
+//
+// NewID does not use randomness, so rand.Read entropy failures are not possible.
 func NewID() uint64 {
-	// use current timestamp in milliseconds for the high 48 bits
-	//nolint
-	now := uint64(time.Now().UnixMilli()) << 16
+	newIDState.mu.Lock()
+	defer newIDState.mu.Unlock()
 
-	// generate 16 bits of randomness for the lower part
-	var rnd [2]byte
-	_, _ = rand.Read(rnd[:]) // ignore error because entropy failure is extremely rare
-	randomPart := uint64(binary.BigEndian.Uint16(rnd[:]))
+	now := currentUnixMilli()
+	if now > newIDState.lastMilli {
+		newIDState.lastMilli = now
+		newIDState.sequence = 0
+	} else if newIDState.sequence < idSequenceMask {
+		newIDState.sequence++
+	} else {
+		newIDState.lastMilli = (newIDState.lastMilli + 1) & idTimestampMask
+		newIDState.sequence = 0
+	}
 
-	// combine timestamp and randomness into a unique 64-bit ID
-	return now | randomPart
+	return newIDState.lastMilli<<idSequenceBits | newIDState.sequence
+}
+
+func currentUnixMilli() uint64 {
+	now := time.Now().UnixMilli()
+	if now < 0 {
+		return 0
+	}
+
+	return uint64(now) & idTimestampMask
 }

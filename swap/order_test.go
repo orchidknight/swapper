@@ -12,7 +12,6 @@ import (
 	"testing"
 )
 
-// nolint
 func TestSwapper_ConsumeOrder(t *testing.T) {
 	tests := map[string]struct {
 		inputOrder         *models.Order
@@ -150,7 +149,7 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 	logMock := NewLogMock()
 
 	for name, tc := range tests {
-		s := NewSwapper(tc.inputMarketService, nil, &MockedStorage{}, logMock)
+		s := NewSwapper(tc.inputMarketService, &MockedStorage{}, logMock)
 
 		t.Run(name, func(t *testing.T) {
 			gotReport, err := s.ConsumeOrder(ctx, tc.inputOrder)
@@ -179,7 +178,7 @@ func TestSwapper_ConsumeOrderAppliesMarketPrecisionToFirstSubOrder(t *testing.T)
 				TradingEnabled: true,
 			},
 		},
-	}, nil, &MockedStorage{}, NewLogMock())
+	}, &MockedStorage{}, NewLogMock())
 
 	report, err := swapper.ConsumeOrder(context.Background(), &models.Order{
 		ID:              7,

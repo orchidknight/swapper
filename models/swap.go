@@ -8,28 +8,47 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// SwapStatus identifies the current lifecycle state of a swap.
 type SwapStatus string
+
+// StepStatus identifies the current lifecycle state of a swap step.
 type StepStatus string
+
+// SwapType describes the order of generated market operations.
 type SwapType string
 
 const (
-	StepStatusNew        = "new"
+	// StepStatusNew means the step has not started execution.
+	StepStatusNew = "new"
+	// StepStatusInProgress means the step has a partially executed suborder.
 	StepStatusInProgress = "inProgress"
-	StepStatusCompleted  = "completed"
-	StepStatusRejected   = "rejected"
-	StepStatusCanceled   = "canceled"
+	// StepStatusCompleted means the step has completed.
+	StepStatusCompleted = "completed"
+	// StepStatusRejected means the step was rejected.
+	StepStatusRejected = "rejected"
+	// StepStatusCanceled means the step was canceled.
+	StepStatusCanceled = "canceled"
 
-	SwapStatusNew        = "new"
+	// SwapStatusNew means the swap is waiting for its next suborder.
+	SwapStatusNew = "new"
+	// SwapStatusInProgress means at least one suborder is active or partially completed.
 	SwapStatusInProgress = "inProgress"
-	SwapStatusCompleted  = "completed"
-	SwapStatusRejected   = "rejected"
-	SwapStatusCanceled   = "canceled"
+	// SwapStatusCompleted means all swap steps completed.
+	SwapStatusCompleted = "completed"
+	// SwapStatusRejected means the swap cannot continue.
+	SwapStatusRejected = "rejected"
+	// SwapStatusCanceled means the swap was canceled.
+	SwapStatusCanceled = "canceled"
 
+	// SwapTypeUnspecified is the zero-value swap type.
 	SwapTypeUnspecified = "unspecified"
+	// SwapTypeBuyThenSell is reserved for buy swaps and is currently rejected.
 	SwapTypeBuyThenSell = "buy-then-sell"
+	// SwapTypeSellThenBuy is the supported sell-swap execution mode.
 	SwapTypeSellThenBuy = "sell-then-buy"
 )
 
+// Swap tracks the state of a swap order and its generated suborders.
 type Swap struct {
 	ID            uint64
 	Type          SwapType
@@ -47,6 +66,7 @@ type Swap struct {
 	CreatedAt time.Time
 }
 
+// String returns a debug representation of the swap.
 func (s *Swap) String() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -54,6 +74,7 @@ func (s *Swap) String() string {
 	return fmt.Sprintf("%d %s %s %v %v", s.ID, s.Type, s.Status, s.SubOrders, s.Steps)
 }
 
+// Step describes one market operation in a swap path.
 type Step struct {
 	ID             int             `json:"id"`
 	Status         StepStatus      `json:"status"`
@@ -69,11 +90,12 @@ type Step struct {
 	QuotePrecision int32           `json:"quotePrecision"`
 }
 
+// String returns a debug representation of the step.
 func (s *Step) String() string {
 	return fmt.Sprintf("{%d %s %s %s Spent: %v%s Received: %v%s}", s.ID, s.Status, s.Side, s.Symbol, s.SpentAmount, s.SpentAsset, s.ReceivedAmount, s.ReceivedAsset)
 }
 
-// nolint
+// Update applies an exchange order update to the step.
 func (s *Step) Update(o *Order) {
 	s.Order = o
 	switch o.Status {
@@ -90,6 +112,7 @@ func (s *Step) Update(o *Order) {
 	if s.Type == SwapTypeBuyThenSell {
 		// not supported, see spec §10
 		s.Status = StepStatusRejected
+
 		return
 	}
 
@@ -103,7 +126,7 @@ func (s *Step) Update(o *Order) {
 	}
 }
 
-// nolint
+// Update applies a suborder result to the swap and reports whether it was accepted.
 func (s *Swap) Update(o *Order) bool {
 	if o == nil {
 		return false
@@ -155,18 +178,14 @@ func (s *Swap) Update(o *Order) bool {
 			return true
 		}
 
-		fmt.Println("Swap completed!")
 		return true
 	}
 
 	if o.Status == OrderStatusRejected && s.CurrentStep == 0 && s.CurrentPath != len(s.Paths)-1 {
-
 		s.RejectedSteps = append(s.RejectedSteps, s.Steps[stepIndex])
 
 		s.CurrentPath++
 		newPathIndex := s.CurrentPath
-
-		fmt.Printf("GOT REJECT ON FIRST STEP, try next %v, rejected: %v \n", s.Paths[newPathIndex].Pairs, s.RejectedSteps)
 
 		if newPathIndex >= len(s.Paths) {
 			s.Status = SwapStatusRejected
@@ -195,7 +214,7 @@ func (s *Swap) Update(o *Order) bool {
 	return true
 }
 
-// nolint
+// NextStepOrder creates the next executable market suborder for the swap.
 func (s *Swap) NextStepOrder() (*Order, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -274,15 +293,18 @@ func truncatePrecision(value decimal.Decimal, precision int32) decimal.Decimal {
 	return value.Truncate(precision)
 }
 
+// SwapperReport is returned after consuming a swap order or suborder result.
 type SwapperReport struct {
 	SubOrderToSend  *Order
 	ResultSwapOrder *Order
 }
 
+// String returns a debug representation of the report.
 func (sr *SwapperReport) String() string {
 	return fmt.Sprintf("{Order: %v}", sr.SubOrderToSend)
 }
 
+// StepPairs returns the ordered market symbols in the current swap path.
 func (s *Swap) StepPairs() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -296,11 +318,13 @@ func (s *Swap) StepPairs() []string {
 	return pairs
 }
 
+// PairStep describes a market symbol and side pair.
 type PairStep struct {
 	Pair string
 	Side Side
 }
 
+// NewSwap creates a swap state machine for an order and candidate paths.
 func NewSwap(o *Order, allSteps []*LinkedPairs) *Swap {
 	swapType := swapType(o)
 

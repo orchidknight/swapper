@@ -6,38 +6,62 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// OrderType identifies the execution semantics of an order.
 type OrderType string
 
+// String returns the raw order type value.
 func (o OrderType) String() string {
 	return string(o)
 }
 
 const (
+	// OrderTypeUnspecified is the zero-value order type.
 	OrderTypeUnspecified OrderType = "Unspecified"
-	OrderTypeLimit       OrderType = "Limit"
-	OrderTypeMarket      OrderType = "Market"
-	OrderTypeStopLimit   OrderType = "StopLimit"
-	OrderTypeStopMarket  OrderType = "StopMarket"
-	OrderTypeSwap        OrderType = "Swap"
+
+	// OrderTypeLimit is a limit order.
+	OrderTypeLimit OrderType = "Limit"
+
+	// OrderTypeMarket is a market order.
+	OrderTypeMarket OrderType = "Market"
+
+	// OrderTypeStopLimit is a stop-limit order.
+	OrderTypeStopLimit OrderType = "StopLimit"
+
+	// OrderTypeStopMarket is a stop-market order.
+	OrderTypeStopMarket OrderType = "StopMarket"
+
+	// OrderTypeSwap is an aggregate order that is expanded into market suborders.
+	OrderTypeSwap OrderType = "Swap"
 )
 
+// OrderStatus identifies the current lifecycle state of an order.
 type OrderStatus string
 
+// String returns the raw order status value.
 func (os OrderStatus) String() string {
 	return string(os)
 }
 
 const (
-	OrderStatusUnspecified        OrderStatus = "Unspecified"
-	OrderStatusNew                OrderStatus = "New"
-	OrderStatusTriggered          OrderStatus = "Triggered"
-	OrderStatusOpen               OrderStatus = "Open"
+	// OrderStatusUnspecified is the zero-value order status.
+	OrderStatusUnspecified OrderStatus = "Unspecified"
+	// OrderStatusNew means the order has not started execution.
+	OrderStatusNew OrderStatus = "New"
+	// OrderStatusTriggered means a stop condition has triggered.
+	OrderStatusTriggered OrderStatus = "Triggered"
+	// OrderStatusOpen means the order is active on an execution venue.
+	OrderStatusOpen OrderStatus = "Open"
+	// OrderStatusPartiallyCompleted means the order executed partially.
 	OrderStatusPartiallyCompleted OrderStatus = "PartiallyCompleted"
-	OrderStatusCompleted          OrderStatus = "Completed"
-	OrderStatusCanceled           OrderStatus = "Canceled"
-	OrderStatusRejected           OrderStatus = "Rejected"
+	// OrderStatusCompleted means the order executed fully.
+	OrderStatusCompleted OrderStatus = "Completed"
+	// OrderStatusCanceled means the order was canceled.
+	OrderStatusCanceled OrderStatus = "Canceled"
+	// OrderStatusRejected means the order was rejected.
+	OrderStatusRejected OrderStatus = "Rejected"
 )
 
+// Order represents either a user swap order or a generated market suborder.
 type Order struct {
 	ID      uint64 `json:"ID"`
 	Account string `json:"account"`
@@ -64,28 +88,7 @@ type Order struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
-func (o *Order) TotalExecuted() decimal.Decimal {
-	return o.ExecutedAmount.Mul(o.AvgPrice)
-}
-
-func (o *Order) IsNewStopOrder() bool {
-	return (o.Type == OrderTypeStopMarket || o.Type == OrderTypeStopLimit) && o.Status == OrderStatusNew
-}
-
-type MatchedOrder struct {
-	Order         *Order          `json:"order"`
-	IsDone        bool            `json:"isDone"`
-	MatchedAmount decimal.Decimal `json:"matchedAmount"`
-}
-
-func (o *Order) Cancel() {
-	o.CanceledAmount = o.CanceledAmount.Add(o.AvailableAmount)
-	o.CanceledTotal = o.CanceledTotal.Add(o.AvailableTotal)
-	o.AvailableAmount = decimal.Zero
-	o.AvailableTotal = decimal.Zero
-	o.Status = OrderStatusCanceled
-}
-
+// Reject marks the order as rejected with the provided reason.
 func (o *Order) Reject(rejectReason RejectReason) {
 	o.Status = OrderStatusRejected
 	o.RejectReason = rejectReason

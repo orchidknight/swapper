@@ -7,30 +7,27 @@ import (
 	"sync"
 )
 
+// MarketProvider supplies market paths and metadata required to build swap steps.
 type MarketProvider interface {
 	GetAllSwapPairs(symbol models.Symbol) ([]*models.LinkedPairs, error)
 	GetMarket(symbol models.Symbol) *models.MarketPair
 }
 
-type OrderSender interface {
-	SendOrder(ctx context.Context, o *models.Order) error
-}
-
+// Swapper orchestrates active swaps and maps suborder results back to their source swap.
 type Swapper struct {
 	activeSwaps map[uint64]*models.Swap
 	markets     MarketProvider
 	storage     models.Storage
 
 	orders map[uint64]uint64
-	sender OrderSender
 
 	lock sync.RWMutex
 	log  models.Logger
 }
 
+// NewSwapper creates a Swapper with caller-provided ports.
 func NewSwapper(
 	markets MarketProvider,
-	orderSender OrderSender,
 	storage models.Storage,
 	log models.Logger,
 ) *Swapper {
@@ -39,12 +36,12 @@ func NewSwapper(
 		lock:        sync.RWMutex{},
 		activeSwaps: make(map[uint64]*models.Swap),
 		orders:      make(map[uint64]uint64),
-		sender:      orderSender,
 		storage:     storage,
 		log:         log,
 	}
 }
 
+// AllSwapSteps returns valid market paths for the order symbol with market precision applied.
 func (s *Swapper) AllSwapSteps(o *models.Order) ([]*models.LinkedPairs, error) {
 	var validSwapSteps []*models.LinkedPairs
 
@@ -95,6 +92,7 @@ func (s *Swapper) findSwapByOrder(id uint64) (*models.Swap, error) {
 	return nil, nil
 }
 
+// LoadOrders restores active swaps from Storage.
 func (s *Swapper) LoadOrders(ctx context.Context) error {
 	activeSwaps, err := s.storage.GetAllSwaps(ctx)
 	if err != nil {
@@ -114,7 +112,9 @@ func (s *Swapper) LoadOrders(ctx context.Context) error {
 		}
 	}
 
-	fmt.Printf("Loaded: %d swaps\n", len(activeSwaps))
+	if s.log != nil {
+		s.log.Debug("swapper", "loaded swaps: %d", len(activeSwaps))
+	}
 
 	return nil
 }

@@ -11,16 +11,16 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// nolint
+type consumeSubOrderResultTestCase struct {
+	inputOrder           *models.Order
+	inputSubOrderResults []*models.Order
+	inputMarketService   MarketProvider
+	wantSwapReports      []*models.SwapperReport
+	wantErr              string
+}
+
 func TestSwapper_ConsumeSubOrderResult(t *testing.T) {
-	tests := map[string]struct {
-		inputOrder           *models.Order
-		inputSubOrderResults []*models.Order
-		inputMarketService   MarketProvider
-		inputSwap            *models.Swap
-		wantSwapReports      []*models.SwapperReport
-		wantErr              string
-	}{
+	tests := map[string]consumeSubOrderResultTestCase{
 		"two phase swap sell then buy: success first step ": {
 			inputOrder: &models.Order{
 				ID:              1,
@@ -285,29 +285,38 @@ func TestSwapper_ConsumeSubOrderResult(t *testing.T) {
 	logger := NewLogMock()
 
 	for name, tc := range tests {
-		s := NewSwapper(tc.inputMarketService, nil, &MockedStorage{}, logger)
-
 		t.Run(name, func(t *testing.T) {
-			swapReport, err := s.ConsumeOrder(ctx, tc.inputOrder)
-			if err != nil {
-				t.Fatalf("consume order error: %v", err)
-			}
-
-			var got *models.SwapperReport
-			for i, inputReport := range tc.inputSubOrderResults {
-				inputReport.ID = swapReport.SubOrderToSend.ID
-				got, err = s.ConsumeSubOrderResult(ctx, inputReport)
-				assertError(t, err, tc.wantErr)
-
-				if err = reportEquals(got, tc.wantSwapReports[i]); err != nil {
-					t.Fatalf("reports do not match: %v", err)
-				}
-
-				if got.SubOrderToSend != nil {
-					swapReport.SubOrderToSend = got.SubOrderToSend
-				}
-			}
+			runConsumeSubOrderResultCase(ctx, t, logger, tc)
 		})
+	}
+}
+
+func runConsumeSubOrderResultCase(
+	ctx context.Context,
+	t *testing.T,
+	logger models.Logger,
+	tc consumeSubOrderResultTestCase,
+) {
+	t.Helper()
+
+	s := NewSwapper(tc.inputMarketService, &MockedStorage{}, logger)
+	swapReport, err := s.ConsumeOrder(ctx, tc.inputOrder)
+	if err != nil {
+		t.Fatalf("consume order error: %v", err)
+	}
+
+	for i, inputReport := range tc.inputSubOrderResults {
+		inputReport.ID = swapReport.SubOrderToSend.ID
+		got, err := s.ConsumeSubOrderResult(ctx, inputReport)
+		assertError(t, err, tc.wantErr)
+
+		if err = reportEquals(got, tc.wantSwapReports[i]); err != nil {
+			t.Fatalf("reports do not match: %v", err)
+		}
+
+		if got.SubOrderToSend != nil {
+			swapReport.SubOrderToSend = got.SubOrderToSend
+		}
 	}
 }
 
@@ -334,7 +343,7 @@ func TestSwapper_ConsumeSubOrderResultUnlocksAfterNextStepOrderError(t *testing.
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			s := NewSwapper(nil, nil, &MockedStorage{}, NewLogMock())
+			s := NewSwapper(nil, &MockedStorage{}, NewLogMock())
 			s.activeSwaps[tc.swap.ID] = tc.swap
 			s.orders[tc.order.ID] = tc.swap.ID
 

@@ -32,7 +32,7 @@ func TestSwapper_AllSwapStepsFiltersEmptyPairs(t *testing.T) {
 			validPairs,
 			{Pairs: []models.Pair{}},
 		},
-	}, nil, nil, nil)
+	}, nil, nil)
 
 	got, err := swapper.AllSwapSteps(&models.Order{Symbol: "BTC-USDT"})
 	if err != nil {

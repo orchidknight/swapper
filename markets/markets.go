@@ -13,10 +13,14 @@ const (
 )
 
 var (
+	// ErrInvalidSwapPairSameAssets means a requested swap symbol uses the same source and destination asset.
 	ErrInvalidSwapPairSameAssets = errors.New("invalid symbol, same base and quote asset")
-	ErrInvalidSwapPair           = errors.New("invalid symbol, cant extract base and quote asset")
+
+	// ErrInvalidSwapPair means a requested swap symbol cannot be split into base and quote assets.
+	ErrInvalidSwapPair = errors.New("invalid symbol, cant extract base and quote asset")
 )
 
+// MarketService stores available markets and finds candidate paths between assets.
 type MarketService struct {
 	Markets map[models.Symbol]*models.MarketPair
 }
@@ -26,6 +30,7 @@ type linkedMarket struct {
 	market *models.MarketPair
 }
 
+// New builds a MarketService from a list of market pairs.
 func New(m []*models.MarketPair) *MarketService {
 	markets := make(map[models.Symbol]*models.MarketPair)
 	for i := range m {
@@ -37,10 +42,12 @@ func New(m []*models.MarketPair) *MarketService {
 	}
 }
 
+// GetMarket returns market metadata for the given symbol.
 func (ms *MarketService) GetMarket(s models.Symbol) *models.MarketPair {
 	return ms.Markets[s]
 }
 
+// GetAllSwapPairs returns all deterministic market paths for a swap symbol.
 func (ms *MarketService) GetAllSwapPairs(symbol models.Symbol) ([]*models.LinkedPairs, error) {
 	exceptions := make(map[string]struct{})
 	parts := strings.Split(symbol.String(), separator)
