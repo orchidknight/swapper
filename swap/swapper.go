@@ -62,7 +62,7 @@ func (s *Swapper) AllSwapSteps(o *models.Order) ([]*models.LinkedPairs, error) {
 		return validSwapSteps, fmt.Errorf("can't find pairs for swap %s", o.Symbol)
 	}
 
-	return steps, nil
+	return validSwapSteps, nil
 }
 
 func (s *Swapper) findSwapByOrder(id uint64) (*models.Swap, error) {

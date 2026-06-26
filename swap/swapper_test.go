@@ -2,11 +2,48 @@ package swap
 
 import (
 	"fmt"
+	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/orchidknight/swapper/models"
 	"github.com/shopspring/decimal"
 )
+
+type staticMarketProvider struct {
+	swapPairs []*models.LinkedPairs
+	err       error
+}
+
+func (smp *staticMarketProvider) GetAllSwapPairs(models.Symbol) ([]*models.LinkedPairs, error) {
+	return smp.swapPairs, smp.err
+}
+
+func (*staticMarketProvider) GetMarket(models.Symbol) *models.MarketPair {
+	return nil
+}
+
+func TestSwapper_AllSwapStepsFiltersEmptyPairs(t *testing.T) {
+	validPairs := &models.LinkedPairs{
+		Pairs: []models.Pair{{Symbol: "BTC-USDT"}},
+	}
+	swapper := NewSwapper(&staticMarketProvider{
+		swapPairs: []*models.LinkedPairs{
+			{Pairs: nil},
+			validPairs,
+			{Pairs: []models.Pair{}},
+		},
+	}, nil, nil, nil)
+
+	got, err := swapper.AllSwapSteps(&models.Order{Symbol: "BTC-USDT"})
+	if err != nil {
+		t.Fatalf("all swap steps: %v", err)
+	}
+
+	want := []*models.LinkedPairs{validPairs}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("swap steps mismatch (-want +got):\n%s", diff)
+	}
+}
 
 func orderEquals(got, want *models.Order) error {
 	if got == nil && want == nil {

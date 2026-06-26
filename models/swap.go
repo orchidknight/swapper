@@ -101,7 +101,6 @@ func (s *Step) Update(o *Order) {
 			s.ReceivedAmount = o.ExecutedAmount.Mul(o.AvgPrice)
 			s.SpentAmount = o.ExecutedAmount
 		}
-	case SwapTypeBuyThenSell:
 	}
 }
 
@@ -220,11 +219,6 @@ func (s *Swap) NextStepOrder() (*Order, error) {
 
 		prevStep := s.Steps[i-1]
 		orderSide := prevStep.Side.Opposite()
-
-		switch s.Type {
-		case SwapTypeBuyThenSell:
-		case SwapTypeSellThenBuy:
-		}
 
 		order := &Order{
 			ID:             suborderID,

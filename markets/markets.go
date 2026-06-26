@@ -21,7 +21,12 @@ type MarketService struct {
 	Markets map[models.Symbol]*models.MarketPair
 }
 
-func New(m []*models.MarketPair) (*MarketService, error) {
+type linkedMarket struct {
+	asset  string
+	market *models.MarketPair
+}
+
+func New(m []*models.MarketPair) *MarketService {
 	markets := make(map[models.Symbol]*models.MarketPair)
 	for i := range m {
 		markets[m[i].Symbol] = m[i]
@@ -29,7 +34,7 @@ func New(m []*models.MarketPair) (*MarketService, error) {
 
 	return &MarketService{
 		Markets: markets,
-	}, nil
+	}
 }
 
 func (ms *MarketService) GetMarket(s models.Symbol) *models.MarketPair {
@@ -49,24 +54,46 @@ func (ms *MarketService) GetAllSwapPairs(symbol models.Symbol) ([]*models.Linked
 	}
 
 	allLinkedPairs := ms.findAllLinks(src, dst, exceptions)
-	sortSlicesByLength(allLinkedPairs)
+	sortLinkedPairs(allLinkedPairs)
 
 	return allLinkedPairs, nil
 }
 
-func (ms *MarketService) linkedAssets(asset string, skip map[string]struct{}) map[string]*models.MarketPair {
-	result := make(map[string]*models.MarketPair)
+func (ms *MarketService) linkedAssets(asset string, skip map[string]struct{}) []linkedMarket {
+	linkedMarkets := make(map[string]*models.MarketPair)
 	for _, market := range ms.Markets {
 		if !market.TradingEnabled {
 			continue
 		}
-		ok, linkedAsset := market.HasAndReturnAnother(asset)
-		if ok {
-			if _, ok := skip[market.Symbol.String()]; !ok {
-				result[linkedAsset] = market
-			}
+		isLinked, linkedAsset := market.HasAndReturnAnother(asset)
+		if !isLinked {
+			continue
+		}
+		if _, skipped := skip[market.Symbol.String()]; skipped {
+			continue
+		}
+
+		currentMarket, exists := linkedMarkets[linkedAsset]
+		if !exists || market.Symbol.String() < currentMarket.Symbol.String() {
+			linkedMarkets[linkedAsset] = market
 		}
 	}
+
+	result := make([]linkedMarket, 0, len(linkedMarkets))
+	for linkedAsset, market := range linkedMarkets {
+		result = append(result, linkedMarket{
+			asset:  linkedAsset,
+			market: market,
+		})
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].asset != result[j].asset {
+			return result[i].asset < result[j].asset
+		}
+
+		return result[i].market.Symbol.String() < result[j].market.Symbol.String()
+	})
 
 	return result
 }
@@ -75,20 +102,25 @@ func (ms *MarketService) findAllLinks(src, dst string, exceptions map[string]str
 	var results []*models.LinkedPairs
 
 	linkedAssets := ms.linkedAssets(dst, exceptions)
-	linked, ok := linkedAssets[src]
-	if ok {
+	for _, linkedAsset := range linkedAssets {
+		if linkedAsset.asset != src {
+			continue
+		}
+
 		results = append(results, &models.LinkedPairs{
-			Pairs: []models.Pair{{Symbol: linked.Symbol}},
+			Pairs: []models.Pair{{Symbol: linkedAsset.market.Symbol}},
 		})
 
 		return results
 	}
 
-	for linkedAsset, pair := range linkedAssets {
-		exceptions[pair.Symbol.String()] = struct{}{}
-		linkedPairs := ms.findAllLinks(src, linkedAsset, exceptions)
+	for _, linkedAsset := range linkedAssets {
+		branchExceptions := copyExceptions(exceptions)
+		branchExceptions[linkedAsset.market.Symbol.String()] = struct{}{}
+
+		linkedPairs := ms.findAllLinks(src, linkedAsset.asset, branchExceptions)
 		for _, linkedPair := range linkedPairs {
-			linkedPair.Pairs = append(linkedPair.Pairs, models.Pair{Symbol: pair.Symbol})
+			linkedPair.Pairs = append(linkedPair.Pairs, models.Pair{Symbol: linkedAsset.market.Symbol})
 			results = append(results, linkedPair)
 		}
 	}
@@ -96,8 +128,37 @@ func (ms *MarketService) findAllLinks(src, dst string, exceptions map[string]str
 	return results
 }
 
-func sortSlicesByLength(slices []*models.LinkedPairs) {
+func copyExceptions(exceptions map[string]struct{}) map[string]struct{} {
+	result := make(map[string]struct{}, len(exceptions))
+	for exception := range exceptions {
+		result[exception] = struct{}{}
+	}
+
+	return result
+}
+
+func sortLinkedPairs(slices []*models.LinkedPairs) {
 	sort.Slice(slices, func(i, j int) bool {
-		return len(slices[i].Pairs) < len(slices[j].Pairs)
+		if len(slices[i].Pairs) != len(slices[j].Pairs) {
+			return len(slices[i].Pairs) < len(slices[j].Pairs)
+		}
+
+		return linkedPairsLess(slices[i], slices[j])
 	})
+}
+
+func linkedPairsLess(left, right *models.LinkedPairs) bool {
+	if left == nil || right == nil {
+		return left != nil
+	}
+
+	for i := 0; i < len(left.Pairs) && i < len(right.Pairs); i++ {
+		leftSymbol := left.Pairs[i].Symbol.String()
+		rightSymbol := right.Pairs[i].Symbol.String()
+		if leftSymbol != rightSymbol {
+			return leftSymbol < rightSymbol
+		}
+	}
+
+	return len(left.Pairs) < len(right.Pairs)
 }
