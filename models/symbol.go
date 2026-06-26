@@ -80,5 +80,11 @@ func (lp *LinkedPairs) String() string {
 }
 
 type Pair struct {
-	Symbol Symbol
+	Symbol         Symbol
+	BasePrecision  int32
+	QuotePrecision int32
+}
+
+func (p Pair) String() string {
+	return fmt.Sprintf("{%s}", p.Symbol)
 }

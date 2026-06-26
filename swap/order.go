@@ -2,11 +2,21 @@ package swap
 
 import (
 	"context"
+	"errors"
 	"fmt"
+
 	"github.com/orchidknight/swapper/models"
 )
 
 func (s *Swapper) ConsumeOrder(ctx context.Context, order *models.Order) (*models.SwapperReport, error) {
+	if order.Side == models.SideBuy {
+		order.Reject(models.RejectReasonBuySwapsNotSupported)
+
+		return &models.SwapperReport{
+			ResultSwapOrder: order,
+		}, errors.New("buy swaps not supported")
+	}
+
 	steps, err := s.AllSwapSteps(order)
 	if err != nil {
 		order.Reject(models.RejectReasonUnspecified)

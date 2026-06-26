@@ -19,6 +19,7 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 		inputMarketService MarketProvider
 		wantReport         *models.SwapperReport
 		wantErr            string
+		wantActiveSwaps    int
 	}{
 		"reject swap": {
 			inputOrder: &models.Order{
@@ -44,6 +45,34 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 			},
 			wantErr: "AllSwapSteps: can't find pairs for swap BTC-USDT",
 		},
+		"reject buy swap because unsupported": {
+			inputOrder: &models.Order{
+				ID:             42,
+				Status:         models.OrderStatusNew,
+				Type:           models.OrderTypeSwap,
+				Symbol:         "SHIB-DOGE",
+				Side:           models.SideBuy,
+				AvailableTotal: decimal.NewFromFloat(1000),
+				Total:          decimal.NewFromFloat(1000),
+			},
+			inputMarketService: &markets.MarketService{
+				Markets: inputTwoPhaseMarkets,
+			},
+			wantReport: &models.SwapperReport{
+				SubOrderToSend: nil,
+				ResultSwapOrder: &models.Order{
+					ID:             42,
+					Type:           models.OrderTypeSwap,
+					Status:         models.OrderStatusRejected,
+					Symbol:         "SHIB-DOGE",
+					AvailableTotal: decimal.NewFromFloat(1000),
+					Total:          decimal.NewFromFloat(1000),
+					Side:           models.SideBuy,
+					RejectReason:   models.RejectReasonBuySwapsNotSupported,
+				},
+			},
+			wantErr: "buy swaps not supported",
+		},
 		"one step swap": {
 			inputOrder: &models.Order{
 				ID:              0,
@@ -65,6 +94,7 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 					Side:            models.SideSell,
 				},
 			},
+			wantActiveSwaps: 1,
 		},
 		"2 steps swap sell then buy": {
 			inputOrder: &models.Order{
@@ -88,6 +118,7 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 					Amount:          decimal.NewFromFloat(1000),
 				},
 			},
+			wantActiveSwaps: 1,
 		},
 		"3 steps swap sell then buy": {
 			inputOrder: &models.Order{
@@ -111,6 +142,7 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 					Amount:          decimal.NewFromFloat(1000),
 				},
 			},
+			wantActiveSwaps: 1,
 		},
 	}
 
@@ -127,7 +159,60 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 			if err = reportEquals(gotReport, tc.wantReport); err != nil {
 				t.Fatalf("reports do not match: %v", err)
 			}
+
+			if gotActiveSwaps := len(s.activeSwaps); gotActiveSwaps != tc.wantActiveSwaps {
+				t.Fatalf("active swaps count mismatch: got %d, want %d", gotActiveSwaps, tc.wantActiveSwaps)
+			}
 		})
+	}
+}
+
+func TestSwapper_ConsumeOrderAppliesMarketPrecisionToFirstSubOrder(t *testing.T) {
+	swapper := NewSwapper(&markets.MarketService{
+		Markets: map[models.Symbol]*models.MarketPair{
+			"BTC-USDT": {
+				Symbol:         "BTC-USDT",
+				Base:           "BTC",
+				Quote:          "USDT",
+				BasePrecision:  3,
+				QuotePrecision: 2,
+				TradingEnabled: true,
+			},
+		},
+	}, nil, &MockedStorage{}, NewLogMock())
+
+	report, err := swapper.ConsumeOrder(context.Background(), &models.Order{
+		ID:              7,
+		Status:          models.OrderStatusNew,
+		Type:            models.OrderTypeSwap,
+		Symbol:          "BTC-USDT",
+		Side:            models.SideSell,
+		Amount:          mustDecimal(t, "1000.123456"),
+		AvailableAmount: mustDecimal(t, "1000.123456"),
+	})
+	if err != nil {
+		t.Fatalf("consume order: %v", err)
+	}
+
+	wantAmount := mustDecimal(t, "1000.123")
+	if !report.SubOrderToSend.Amount.Equal(wantAmount) {
+		t.Fatalf("suborder amount mismatch: got %s, want %s", report.SubOrderToSend.Amount, wantAmount)
+	}
+	if !report.SubOrderToSend.AvailableAmount.Equal(wantAmount) {
+		t.Fatalf("suborder available amount mismatch: got %s, want %s", report.SubOrderToSend.AvailableAmount, wantAmount)
+	}
+
+	activeSwap := swapper.activeSwaps[7]
+	if activeSwap == nil {
+		t.Fatal("expected active swap")
+	}
+
+	firstStep := activeSwap.Steps[0]
+	if firstStep.BasePrecision != 3 {
+		t.Fatalf("step base precision mismatch: got %d, want 3", firstStep.BasePrecision)
+	}
+	if firstStep.QuotePrecision != 2 {
+		t.Fatalf("step quote precision mismatch: got %d, want 2", firstStep.QuotePrecision)
 	}
 }
 
@@ -149,6 +234,17 @@ func assertError(t *testing.T, got error, wantContains string) {
 	if !strings.Contains(got.Error(), wantContains) {
 		t.Fatalf("wrong error: got %q, want substring %q", got.Error(), wantContains)
 	}
+}
+
+func mustDecimal(t *testing.T, value string) decimal.Decimal {
+	t.Helper()
+
+	result, err := decimal.NewFromString(value)
+	if err != nil {
+		t.Fatalf("parse decimal %q: %v", value, err)
+	}
+
+	return result
 }
 
 type LogMock struct{}

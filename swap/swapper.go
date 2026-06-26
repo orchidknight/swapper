@@ -54,6 +54,7 @@ func (s *Swapper) AllSwapSteps(o *models.Order) ([]*models.LinkedPairs, error) {
 	}
 	for _, lp := range steps {
 		if len(lp.Pairs) != 0 {
+			s.applyMarketPrecision(lp)
 			validSwapSteps = append(validSwapSteps, lp)
 		}
 	}
@@ -63,6 +64,18 @@ func (s *Swapper) AllSwapSteps(o *models.Order) ([]*models.LinkedPairs, error) {
 	}
 
 	return validSwapSteps, nil
+}
+
+func (s *Swapper) applyMarketPrecision(linkedPairs *models.LinkedPairs) {
+	for i, pair := range linkedPairs.Pairs {
+		market := s.markets.GetMarket(pair.Symbol)
+		if market == nil {
+			continue
+		}
+
+		linkedPairs.Pairs[i].BasePrecision = market.BasePrecision
+		linkedPairs.Pairs[i].QuotePrecision = market.QuotePrecision
+	}
 }
 
 func (s *Swapper) findSwapByOrder(id uint64) (*models.Swap, error) {
