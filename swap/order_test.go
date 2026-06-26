@@ -2,8 +2,9 @@ package swap
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"strings"
+
 	"github.com/orchidknight/swapper/markets"
 	"github.com/orchidknight/swapper/models"
 	"github.com/shopspring/decimal"
@@ -17,7 +18,7 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 		inputOrder         *models.Order
 		inputMarketService MarketProvider
 		wantReport         *models.SwapperReport
-		wantErr            any
+		wantErr            string
 	}{
 		"reject swap": {
 			inputOrder: &models.Order{
@@ -41,7 +42,7 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 					Side:            models.SideSell,
 				},
 			},
-			wantErr: nil,
+			wantErr: "AllSwapSteps: can't find pairs for swap BTC-USDT",
 		},
 		"one step swap": {
 			inputOrder: &models.Order{
@@ -64,7 +65,6 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 					Side:            models.SideSell,
 				},
 			},
-			wantErr: nil,
 		},
 		"2 steps swap sell then buy": {
 			inputOrder: &models.Order{
@@ -88,7 +88,6 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 					Amount:          decimal.NewFromFloat(1000),
 				},
 			},
-			wantErr: nil,
 		},
 		"3 steps swap sell then buy": {
 			inputOrder: &models.Order{
@@ -112,7 +111,6 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 					Amount:          decimal.NewFromFloat(1000),
 				},
 			},
-			wantErr: nil,
 		},
 	}
 
@@ -124,24 +122,32 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 
 		t.Run(name, func(t *testing.T) {
 			gotReport, err := s.ConsumeOrder(ctx, tc.inputOrder)
-			fmt.Println(gotReport, err)
-			if err != nil {
-				if !errors.As(err, tc.wantErr) {
-					t.Fatalf("wrong error wanted")
-				}
+			assertError(t, err, tc.wantErr)
+
+			if err = reportEquals(gotReport, tc.wantReport); err != nil {
+				t.Fatalf("reports do not match: %v", err)
 			}
-
-			fmt.Printf("%v\n", gotReport.SubOrderToSend)
-			fmt.Printf("%v\n", tc.wantReport.SubOrderToSend)
-
-			if err = orderEquals(gotReport.SubOrderToSend, tc.wantReport.SubOrderToSend); err != nil {
-				t.Fatalf("orders do not match: %v", err)
-			} else {
-				fmt.Println("orders match")
-			}
-
-			fmt.Printf("'%s' passed successfully!\n", name)
 		})
+	}
+}
+
+func assertError(t *testing.T, got error, wantContains string) {
+	t.Helper()
+
+	if wantContains == "" {
+		if got != nil {
+			t.Fatalf("unexpected error: %v", got)
+		}
+
+		return
+	}
+
+	if got == nil {
+		t.Fatalf("expected error containing %q, got nil", wantContains)
+	}
+
+	if !strings.Contains(got.Error(), wantContains) {
+		t.Fatalf("wrong error: got %q, want substring %q", got.Error(), wantContains)
 	}
 }
 

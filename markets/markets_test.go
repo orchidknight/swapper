@@ -1,7 +1,6 @@
 package markets
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -90,7 +89,6 @@ func TestMarketService_GetSwapPairs(t *testing.T) {
 			got, _ := ms.GetAllSwapPairs(tc.inputSymbol)
 			diff := cmp.Diff(tc.wantPairs, got)
 			if diff != "" {
-				fmt.Printf("Got: %s Want: %s\n", got, tc.wantPairs)
 				t.Fatalf("%s", diff)
 			}
 		})

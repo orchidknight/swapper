@@ -1,7 +1,6 @@
 package models
 
 import (
-	"fmt"
 	"testing"
 )
 
@@ -181,8 +180,6 @@ func TestNewSwap(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			gotSwap := NewSwap(tc.inputOrder, tc.inputSteps)
-			fmt.Println("got swap: ", gotSwap)
-			fmt.Println("want swap: ", tc.wantSwap)
 			if gotSwap.String() != tc.wantSwap.String() {
 				t.Fatalf("swaps dont match:\n actual:%s\nwant:%s\n", gotSwap, tc.wantSwap)
 			}

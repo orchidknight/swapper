@@ -2,8 +2,6 @@ package swap
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"github.com/orchidknight/swapper/markets"
 	"github.com/shopspring/decimal"
 	"testing"
@@ -19,7 +17,7 @@ func TestSwapper_ConsumeSubOrderResult(t *testing.T) {
 		inputMarketService   MarketProvider
 		inputSwap            *models.Swap
 		wantSwapReports      []*models.SwapperReport
-		wantErr              any
+		wantErr              string
 	}{
 		"two phase swap sell then buy: success first step ": {
 			inputOrder: &models.Order{
@@ -57,7 +55,6 @@ func TestSwapper_ConsumeSubOrderResult(t *testing.T) {
 					},
 				},
 			},
-			wantErr: nil,
 		},
 		"two phase swap sell then buy: reject first step, rerouting": {
 			inputOrder: &models.Order{
@@ -94,7 +91,6 @@ func TestSwapper_ConsumeSubOrderResult(t *testing.T) {
 					},
 				},
 			},
-			wantErr: nil,
 		},
 		"two phase swap sell then buy: reject all first step, final reject": {
 			inputOrder: &models.Order{
@@ -149,46 +145,44 @@ func TestSwapper_ConsumeSubOrderResult(t *testing.T) {
 					SubOrderToSend: nil,
 				},
 			},
-			wantErr: nil,
 		},
-		//"two phase swap sell then buy: success first step ": {
-		//	inputOrder: &models.Order{
-		//		ID:              1,
-		//		Type:            models.OrderTypeSwap,
-		//		Symbol:          "SHIB-DOGE",
-		//		Side:            models.SideSell,
-		//		Status:          models.OrderStatusNew,
-		//		Amount:          decimal.NewFromFloat(100),
-		//		AvailableAmount: decimal.NewFromFloat(100),
-		//	},
-		//	inputSubOrderResults: []*models.Order{
-		//		{
-		//			Side:            models.SideSell,
-		//			Status:          models.OrderStatusCompleted,
-		//			Symbol:          "SHIB-USDT",
-		//			Price:           decimal.NewFromFloat(10),
-		//			AvgPrice:        decimal.NewFromFloat(10),
-		//			AvailableAmount: decimal.Zero,
-		//			ExecutedAmount:  decimal.NewFromFloat(100),
-		//			ExecutedTotal:   decimal.NewFromFloat(1000),
-		//		},
-		//	},
-		//	inputMarketService: &markets.MarketService{
-		//		Markets: inputTwoPhaseMarkets,
-		//	},
-		//	wantSwapReports: []*models.SwapperReport{
-		//		{
-		//			SubOrderToSend: &models.Order{
-		//				Side:           models.SideBuy,
-		//				AvailableTotal: decimal.NewFromFloat(1000),
-		//				Status:         models.OrderStatusNew,
-		//				Symbol:         "DOGE-USDT",
-		//				Type:           models.OrderTypeMarket,
-		//			},
-		//		},
-		//	},
-		//	wantErr: nil,
-		//},
+		"two phase swap sell then buy: success first step with 100 amount": {
+			inputOrder: &models.Order{
+				ID:              1,
+				Type:            models.OrderTypeSwap,
+				Symbol:          "SHIB-DOGE",
+				Side:            models.SideSell,
+				Status:          models.OrderStatusNew,
+				Amount:          decimal.NewFromFloat(100),
+				AvailableAmount: decimal.NewFromFloat(100),
+			},
+			inputSubOrderResults: []*models.Order{
+				{
+					Side:            models.SideSell,
+					Status:          models.OrderStatusCompleted,
+					Symbol:          "SHIB-USDT",
+					Price:           decimal.NewFromFloat(10),
+					AvgPrice:        decimal.NewFromFloat(10),
+					AvailableAmount: decimal.Zero,
+					ExecutedAmount:  decimal.NewFromFloat(100),
+					ExecutedTotal:   decimal.NewFromFloat(1000),
+				},
+			},
+			inputMarketService: &markets.MarketService{
+				Markets: inputTwoPhaseMarkets,
+			},
+			wantSwapReports: []*models.SwapperReport{
+				{
+					SubOrderToSend: &models.Order{
+						Side:           models.SideBuy,
+						AvailableTotal: decimal.NewFromFloat(1000),
+						Status:         models.OrderStatusNew,
+						Symbol:         "DOGE-USDT",
+						Type:           models.OrderTypeMarket,
+					},
+				},
+			},
+		},
 		"two phase swap sell then buy: partially completed ": {
 			inputOrder: &models.Order{
 				ID:              1,
@@ -216,7 +210,6 @@ func TestSwapper_ConsumeSubOrderResult(t *testing.T) {
 					ResultSwapOrder: nil,
 				},
 			},
-			wantErr: nil,
 		},
 		"two phase swap sell then buy: completed": {
 			inputOrder: &models.Order{
@@ -283,7 +276,6 @@ func TestSwapper_ConsumeSubOrderResult(t *testing.T) {
 					},
 				},
 			},
-			wantErr: nil,
 		},
 	}
 
@@ -303,32 +295,14 @@ func TestSwapper_ConsumeSubOrderResult(t *testing.T) {
 			for i, inputReport := range tc.inputSubOrderResults {
 				inputReport.ID = swapReport.SubOrderToSend.ID
 				got, err = s.ConsumeSubOrderResult(ctx, inputReport)
-				fmt.Printf("got: %v; err: %v\n", got, err)
-				if err != nil {
-					if !errors.As(err, tc.wantErr) {
-						t.Fatalf("wrong error wanted")
-					}
+				assertError(t, err, tc.wantErr)
+
+				if err = reportEquals(got, tc.wantSwapReports[i]); err != nil {
+					t.Fatalf("reports do not match: %v", err)
 				}
 
-				fmt.Println("got order to send: ", got.SubOrderToSend)
-				fmt.Println("want order to send:", tc.wantSwapReports[i].SubOrderToSend)
-
-				if got.SubOrderToSend != nil && tc.wantSwapReports[i].SubOrderToSend != nil {
-					//fmt.Println("got order: ", got.SubOrderToSend)
-					//fmt.Println("want order: ", tc.wantSwapReports[i].SubOrderToSend)
-					if err = orderEquals(got.SubOrderToSend, tc.wantSwapReports[i].SubOrderToSend); err != nil {
-						t.Fatalf("orders do not match: %v", err)
-					}
-
+				if got.SubOrderToSend != nil {
 					swapReport.SubOrderToSend = got.SubOrderToSend
-				}
-			}
-
-			if got.ResultSwapOrder != nil {
-				fmt.Printf("Got result: %v\n", got.ResultSwapOrder)
-				fmt.Printf("Wnt result: %v\n", tc.wantSwapReports[len(tc.wantSwapReports)-1].ResultSwapOrder)
-				if err = orderEquals(got.ResultSwapOrder, tc.wantSwapReports[len(tc.wantSwapReports)-1].ResultSwapOrder); err != nil {
-					t.Fatalf("orders do not match: %v", err)
 				}
 			}
 		})

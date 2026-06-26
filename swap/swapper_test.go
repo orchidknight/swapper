@@ -3,39 +3,66 @@ package swap
 import (
 	"fmt"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/orchidknight/swapper/models"
+	"github.com/shopspring/decimal"
 )
 
 func orderEquals(got, want *models.Order) error {
-	if got.Side != want.Side {
-		return fmt.Errorf("wrong side")
-	}
-	if got.Type != want.Type {
-		return fmt.Errorf("wrong type")
+	if got == nil && want == nil {
+		return nil
 	}
 
-	if !got.AvailableAmount.Equal(want.AvailableAmount) {
-		return fmt.Errorf("wrong available amount")
+	if got == nil {
+		return fmt.Errorf("got nil order, want %v", want)
 	}
 
-	if !got.ExecutedAmount.Equal(want.ExecutedAmount) {
-		return fmt.Errorf("wrong executed amount")
+	if want == nil {
+		return fmt.Errorf("got %v, want nil order", got)
 	}
 
-	if !got.AvailableTotal.Equal(want.AvailableTotal) {
-		return fmt.Errorf("wrong available total")
+	gotComparable := *got
+	wantComparable := *want
+
+	if want.ID == 0 {
+		gotComparable.ID = 0
+	}
+	if want.Account == "" {
+		gotComparable.Account = ""
+	}
+	if want.RejectReason == "" {
+		gotComparable.RejectReason = ""
+	}
+	if want.CreatedAt.IsZero() {
+		gotComparable.CreatedAt = wantComparable.CreatedAt
 	}
 
-	if !got.ExecutedTotal.Equal(want.ExecutedTotal) {
-		return fmt.Errorf("wrong executed total")
+	if diff := cmp.Diff(wantComparable, gotComparable, cmp.Comparer(decimal.Decimal.Equal)); diff != "" {
+		return fmt.Errorf("order mismatch (-want +got):\n%s", diff)
 	}
 
-	if !got.AvgPrice.Equal(want.AvgPrice) {
-		return fmt.Errorf("wrong avg price")
+	return nil
+}
+
+func reportEquals(got, want *models.SwapperReport) error {
+	if got == nil && want == nil {
+		return nil
 	}
 
-	if got.Symbol != want.Symbol {
-		return fmt.Errorf("wrong symbol")
+	if got == nil {
+		return fmt.Errorf("got nil report, want %v", want)
+	}
+
+	if want == nil {
+		return fmt.Errorf("got %v, want nil report", got)
+	}
+
+	if err := orderEquals(got.SubOrderToSend, want.SubOrderToSend); err != nil {
+		return fmt.Errorf("sub order to send: %w", err)
+	}
+
+	if err := orderEquals(got.ResultSwapOrder, want.ResultSwapOrder); err != nil {
+		return fmt.Errorf("result swap order: %w", err)
 	}
 
 	return nil
