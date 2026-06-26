@@ -2,11 +2,13 @@ package swap
 
 import (
 	"context"
-	"github.com/orchidknight/swapper/markets"
-	"github.com/shopspring/decimal"
+	"errors"
 	"testing"
+	"time"
 
+	"github.com/orchidknight/swapper/markets"
 	"github.com/orchidknight/swapper/models"
+	"github.com/shopspring/decimal"
 )
 
 // nolint
@@ -306,6 +308,113 @@ func TestSwapper_ConsumeSubOrderResult(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSwapper_ConsumeSubOrderResultUnlocksAfterNextStepOrderError(t *testing.T) {
+	nextStepErr := errors.New("next step order failed")
+	originalNextStepOrder := nextStepOrder
+	nextStepOrder = func(*models.Swap) (*models.Order, error) {
+		return nil, nextStepErr
+	}
+	t.Cleanup(func() {
+		nextStepOrder = originalNextStepOrder
+	})
+
+	inProgressSwap, inProgressOrder := newNextStepOrderErrorInProgressCase(t)
+	newSwap, newOrder := newNextStepOrderErrorNewCase(t)
+
+	tests := map[string]struct {
+		swap  *models.Swap
+		order *models.Order
+	}{
+		"in progress next step":  {swap: inProgressSwap, order: inProgressOrder},
+		"new rerouted next step": {swap: newSwap, order: newOrder},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			s := NewSwapper(nil, nil, &MockedStorage{}, NewLogMock())
+			s.activeSwaps[tc.swap.ID] = tc.swap
+			s.orders[tc.order.ID] = tc.swap.ID
+
+			_, err := s.ConsumeSubOrderResult(context.Background(), tc.order)
+			if !errors.Is(err, nextStepErr) {
+				t.Fatalf("got error %v, want %v", err, nextStepErr)
+			}
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_, _ = s.ConsumeSubOrderResult(context.Background(), tc.order)
+			}()
+
+			select {
+			case <-done:
+			case <-time.After(200 * time.Millisecond):
+				t.Fatal("ConsumeSubOrderResult blocked after NextStepOrder error")
+			}
+		})
+	}
+}
+
+func newNextStepOrderErrorInProgressCase(t *testing.T) (*models.Swap, *models.Order) {
+	t.Helper()
+
+	swapOrder := &models.Order{
+		ID:              101,
+		Type:            models.OrderTypeSwap,
+		Symbol:          "SOL-PEPE",
+		Side:            models.SideSell,
+		Amount:          decimal.NewFromInt(10),
+		AvailableAmount: decimal.NewFromInt(10),
+	}
+	swap := models.NewSwap(swapOrder, []*models.LinkedPairs{
+		{Pairs: []models.Pair{{Symbol: "SOL-USDT"}, {Symbol: "PEPE-USDT"}}},
+	})
+	subOrder, err := swap.NextStepOrder()
+	if err != nil {
+		t.Fatalf("create initial sub order: %v", err)
+	}
+
+	return swap, &models.Order{
+		ID:             subOrder.ID,
+		Type:           subOrder.Type,
+		Symbol:         subOrder.Symbol,
+		Side:           subOrder.Side,
+		Status:         models.OrderStatusCompleted,
+		ExecutedAmount: decimal.NewFromInt(10),
+		AvgPrice:       decimal.NewFromInt(10),
+	}
+}
+
+func newNextStepOrderErrorNewCase(t *testing.T) (*models.Swap, *models.Order) {
+	t.Helper()
+
+	swapOrder := &models.Order{
+		ID:              102,
+		Type:            models.OrderTypeSwap,
+		Symbol:          "SHIB-DOGE",
+		Side:            models.SideSell,
+		Amount:          decimal.NewFromInt(100),
+		AvailableAmount: decimal.NewFromInt(100),
+	}
+	swap := models.NewSwap(swapOrder, []*models.LinkedPairs{
+		{Pairs: []models.Pair{{Symbol: "SHIB-USDT"}, {Symbol: "DOGE-USDT"}}},
+		{Pairs: []models.Pair{{Symbol: "SHIB-USDC"}, {Symbol: "BIN-USDC"}, {Symbol: "BIN-DOGE"}}},
+	})
+	subOrder, err := swap.NextStepOrder()
+	if err != nil {
+		t.Fatalf("create initial sub order: %v", err)
+	}
+
+	return swap, &models.Order{
+		ID:     subOrder.ID,
+		Type:   subOrder.Type,
+		Symbol: subOrder.Symbol,
+		Side:   subOrder.Side,
+		Status: models.OrderStatusRejected,
+		Amount: decimal.NewFromInt(100),
 	}
 }
 

@@ -111,9 +111,10 @@ func (s *Swap) Update(o *Order) bool {
 		return false
 	}
 
-	s.mu.RLock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	stepIndex, ok := s.SubOrders[o.ID]
-	s.mu.RUnlock()
 
 	if !ok {
 		return false
@@ -188,6 +189,9 @@ func (s *Swap) Update(o *Order) bool {
 
 // nolint
 func (s *Swap) NextStepOrder() (*Order, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	for i, step := range s.Steps {
 		if step.Status != StepStatusNew {
 			continue
@@ -208,10 +212,8 @@ func (s *Swap) NextStepOrder() (*Order, error) {
 				CreatedAt:       time.Now().UTC(),
 			}
 
-			s.mu.Lock()
 			s.SubOrders[order.ID] = i
 			s.Steps[i].Order = order
-			s.mu.Unlock()
 
 			return order, nil
 		}
@@ -235,11 +237,9 @@ func (s *Swap) NextStepOrder() (*Order, error) {
 			CreatedAt:      time.Now().UTC(),
 		}
 
-		s.mu.Lock()
 		s.SubOrders[order.ID] = i
 		s.Steps[i].Order = order
 		s.CurrentStep = i
-		s.mu.Unlock()
 
 		return order, nil
 	}
@@ -257,6 +257,9 @@ func (sr *SwapperReport) String() string {
 }
 
 func (s *Swap) StepPairs() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	var pairs []string
 
 	for _, step := range s.Steps {

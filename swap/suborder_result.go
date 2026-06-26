@@ -7,6 +7,8 @@ import (
 	"github.com/orchidknight/swapper/models"
 )
 
+var nextStepOrder = (*models.Swap).NextStepOrder
+
 // nolint
 func (s *Swapper) ConsumeSubOrderResult(ctx context.Context, order *models.Order) (*models.SwapperReport, error) {
 	sr := new(models.SwapperReport)
@@ -50,8 +52,10 @@ func (s *Swapper) ConsumeSubOrderResult(ctx context.Context, order *models.Order
 	case models.SwapStatusInProgress:
 		if swap.Steps[swap.CurrentStep].Status == models.StepStatusCompleted {
 			s.lock.Lock()
+			defer s.lock.Unlock()
+
 			delete(s.orders, order.ID)
-			sr.SubOrderToSend, err = swap.NextStepOrder()
+			sr.SubOrderToSend, err = nextStepOrder(swap)
 			if err != nil {
 				return nil, err
 			}
@@ -62,21 +66,21 @@ func (s *Swapper) ConsumeSubOrderResult(ctx context.Context, order *models.Order
 			if sr.SubOrderToSend != nil {
 				s.orders[sr.SubOrderToSend.ID] = swap.Order.ID
 			}
-			s.lock.Unlock()
 
 			return sr, nil
 		}
 	case models.SwapStatusNew:
-		delete(s.orders, order.ID)
 		s.lock.Lock()
-		sr.SubOrderToSend, err = swap.NextStepOrder()
+		defer s.lock.Unlock()
+
+		delete(s.orders, order.ID)
+		sr.SubOrderToSend, err = nextStepOrder(swap)
 		if err != nil {
 			return nil, err
 		}
 		if sr.SubOrderToSend != nil {
 			s.orders[sr.SubOrderToSend.ID] = swap.Order.ID
 		}
-		s.lock.Unlock()
 
 		return sr, nil
 	}

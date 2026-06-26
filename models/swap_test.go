@@ -1,7 +1,10 @@
 package models
 
 import (
+	"sync"
 	"testing"
+
+	"github.com/shopspring/decimal"
 )
 
 func TestNewSwap(t *testing.T) {
@@ -185,4 +188,68 @@ func TestNewSwap(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSwapUpdateAndNextStepOrderAreRaceSafe(t *testing.T) {
+	swapOrder := &Order{
+		ID:              1,
+		Account:         "account",
+		Type:            OrderTypeSwap,
+		Symbol:          "SOL-PEPE",
+		Side:            SideSell,
+		Amount:          decimal.NewFromInt(10),
+		AvailableAmount: decimal.NewFromInt(10),
+	}
+	swap := NewSwap(swapOrder, []*LinkedPairs{{
+		Pairs: []Pair{
+			{Symbol: "SOL-USDT"},
+			{Symbol: "PEPE-USDT"},
+		},
+	}})
+
+	subOrder, err := swap.NextStepOrder()
+	if err != nil {
+		t.Fatalf("next step order: %v", err)
+	}
+	if subOrder == nil {
+		t.Fatal("expected first suborder")
+	}
+
+	completedSubOrder := *subOrder
+	completedSubOrder.Status = OrderStatusCompleted
+	completedSubOrder.ExecutedAmount = decimal.NewFromInt(10)
+	completedSubOrder.AvgPrice = decimal.NewFromInt(2)
+
+	const goroutines = 8
+	const iterations = 1000
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(goroutines * 2)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+
+			for j := 0; j < iterations; j++ {
+				order := completedSubOrder
+				swap.Update(&order)
+			}
+		}()
+
+		go func() {
+			defer wg.Done()
+			<-start
+
+			for j := 0; j < iterations; j++ {
+				if _, err := swap.NextStepOrder(); err != nil {
+					t.Errorf("next step order: %v", err)
+				}
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
 }
