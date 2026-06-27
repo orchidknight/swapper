@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"strings"
 
+	"log"
+	"testing"
+
 	"github.com/orchidknight/swapper/markets"
 	"github.com/orchidknight/swapper/models"
 	"github.com/shopspring/decimal"
-	"log"
-	"testing"
 )
 
 func TestSwapper_ConsumeOrder(t *testing.T) {
@@ -23,11 +24,12 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 	}{
 		"reject swap": {
 			inputOrder: &models.Order{
-				ID:              0,
+				ID:              101,
 				Status:          models.OrderStatusNew,
 				Type:            models.OrderTypeSwap,
 				Symbol:          "BTC-USDT",
 				Side:            models.SideSell,
+				Amount:          decimal.NewFromFloat(1000),
 				AvailableAmount: decimal.NewFromFloat(1000),
 			},
 			inputMarketService: &markets.MarketService{
@@ -36,9 +38,11 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 			wantReport: &models.SwapperReport{
 				SubOrderToSend: nil,
 				ResultSwapOrder: &models.Order{
+					ID:              101,
 					Type:            models.OrderTypeSwap,
 					Status:          models.OrderStatusRejected,
 					Symbol:          "BTC-USDT",
+					Amount:          decimal.NewFromFloat(1000),
 					AvailableAmount: decimal.NewFromFloat(1000),
 					Side:            models.SideSell,
 				},
@@ -75,11 +79,12 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 		},
 		"one step swap": {
 			inputOrder: &models.Order{
-				ID:              0,
+				ID:              102,
 				Status:          models.OrderStatusNew,
 				Type:            models.OrderTypeSwap,
 				Symbol:          "BTC-USDT",
 				Side:            models.SideSell,
+				Amount:          decimal.NewFromFloat(1000),
 				AvailableAmount: decimal.NewFromFloat(1000),
 			},
 			inputMarketService: &markets.MarketService{
@@ -90,6 +95,7 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 					Type:            models.OrderTypeMarket,
 					Status:          models.OrderStatusNew,
 					Symbol:          "BTC-USDT",
+					Amount:          decimal.NewFromFloat(1000),
 					AvailableAmount: decimal.NewFromFloat(1000),
 					Side:            models.SideSell,
 				},
@@ -98,6 +104,7 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 		},
 		"2 steps swap sell then buy": {
 			inputOrder: &models.Order{
+				ID:              103,
 				Status:          models.OrderStatusNew,
 				Type:            models.OrderTypeSwap,
 				Side:            models.SideSell,
@@ -122,6 +129,7 @@ func TestSwapper_ConsumeOrder(t *testing.T) {
 		},
 		"3 steps swap sell then buy": {
 			inputOrder: &models.Order{
+				ID:              104,
 				Type:            models.OrderTypeSwap,
 				Status:          models.OrderStatusNew,
 				Side:            models.SideSell,
@@ -243,6 +251,34 @@ func TestSwapper_ConsumeOrderReleasesLockWhenNextStepFails(t *testing.T) {
 	s.lock.Unlock()
 }
 
+func TestSwapper_ConsumeOrderSavesSwapOutsideLock(t *testing.T) {
+	storage := &consumeOrderLockCheckingStorage{}
+	s := NewSwapper(&markets.MarketService{Markets: inputOnePhaseMarkets}, storage, NewLogMock())
+	storage.swapper = s
+
+	report, err := s.ConsumeOrder(context.Background(), &models.Order{
+		ID:              1,
+		Status:          models.OrderStatusNew,
+		Type:            models.OrderTypeSwap,
+		Symbol:          "BTC-USDT",
+		Side:            models.SideSell,
+		Amount:          decimal.NewFromInt(1),
+		AvailableAmount: decimal.NewFromInt(1),
+	})
+	if err != nil {
+		t.Fatalf("consume order: %v", err)
+	}
+	if report == nil || report.SubOrderToSend == nil {
+		t.Fatalf("expected suborder report, got %v", report)
+	}
+	if !storage.saved {
+		t.Fatal("expected SaveSwap to be called")
+	}
+	if storage.calledWhileLocked {
+		t.Fatal("SaveSwap was called while swapper lock was held")
+	}
+}
+
 func TestSwapper_ConsumeOrderValidatesInput(t *testing.T) {
 	s := NewSwapper(&markets.MarketService{Markets: inputOnePhaseMarkets}, &MockedStorage{}, NewLogMock())
 
@@ -285,6 +321,70 @@ func TestSwapper_ConsumeOrderRejectsInvalidSwapOrder(t *testing.T) {
 			wantErr:    "swap side must be sell",
 			wantStatus: models.OrderStatusRejected,
 		},
+		"zero order id": {
+			order: &models.Order{
+				Type:            models.OrderTypeSwap,
+				Status:          models.OrderStatusNew,
+				Symbol:          "BTC-USDT",
+				Side:            models.SideSell,
+				Amount:          decimal.NewFromInt(1),
+				AvailableAmount: decimal.NewFromInt(1),
+			},
+			wantErr:    "order id must be non-zero",
+			wantStatus: models.OrderStatusRejected,
+		},
+		"negative amount": {
+			order: &models.Order{
+				ID:              3,
+				Type:            models.OrderTypeSwap,
+				Status:          models.OrderStatusNew,
+				Symbol:          "BTC-USDT",
+				Side:            models.SideSell,
+				Amount:          decimal.NewFromInt(-1),
+				AvailableAmount: decimal.NewFromInt(-1),
+			},
+			wantErr:    "amount must be positive",
+			wantStatus: models.OrderStatusRejected,
+		},
+		"zero available amount": {
+			order: &models.Order{
+				ID:              4,
+				Type:            models.OrderTypeSwap,
+				Status:          models.OrderStatusNew,
+				Symbol:          "BTC-USDT",
+				Side:            models.SideSell,
+				Amount:          decimal.NewFromInt(1),
+				AvailableAmount: decimal.Zero,
+			},
+			wantErr:    "available amount must be positive",
+			wantStatus: models.OrderStatusRejected,
+		},
+		"available amount exceeds amount": {
+			order: &models.Order{
+				ID:              5,
+				Type:            models.OrderTypeSwap,
+				Status:          models.OrderStatusNew,
+				Symbol:          "BTC-USDT",
+				Side:            models.SideSell,
+				Amount:          decimal.NewFromInt(1),
+				AvailableAmount: decimal.NewFromInt(2),
+			},
+			wantErr:    "available amount exceeds amount",
+			wantStatus: models.OrderStatusRejected,
+		},
+		"already completed order": {
+			order: &models.Order{
+				ID:              6,
+				Type:            models.OrderTypeSwap,
+				Status:          models.OrderStatusCompleted,
+				Symbol:          "BTC-USDT",
+				Side:            models.SideSell,
+				Amount:          decimal.NewFromInt(1),
+				AvailableAmount: decimal.NewFromInt(1),
+			},
+			wantErr:    "order status must be New",
+			wantStatus: models.OrderStatusRejected,
+		},
 	}
 
 	for name, tc := range tests {
@@ -301,6 +401,57 @@ func TestSwapper_ConsumeOrderRejectsInvalidSwapOrder(t *testing.T) {
 				t.Fatalf("status mismatch: got %s, want %s", report.ResultSwapOrder.Status, tc.wantStatus)
 			}
 		})
+	}
+}
+
+func TestSwapper_ConsumeOrderRejectsDuplicateActiveOrderID(t *testing.T) {
+	ctx := context.Background()
+	s := NewSwapper(&markets.MarketService{Markets: inputOnePhaseMarkets}, &MockedStorage{}, NewLogMock())
+
+	firstReport, err := s.ConsumeOrder(ctx, &models.Order{
+		ID:              77,
+		Type:            models.OrderTypeSwap,
+		Status:          models.OrderStatusNew,
+		Symbol:          "BTC-USDT",
+		Side:            models.SideSell,
+		Amount:          decimal.NewFromInt(1),
+		AvailableAmount: decimal.NewFromInt(1),
+	})
+	if err != nil {
+		t.Fatalf("first consume order: %v", err)
+	}
+
+	secondReport, err := s.ConsumeOrder(ctx, &models.Order{
+		ID:              77,
+		Type:            models.OrderTypeSwap,
+		Status:          models.OrderStatusNew,
+		Symbol:          "BTC-USDT",
+		Side:            models.SideSell,
+		Amount:          decimal.NewFromInt(2),
+		AvailableAmount: decimal.NewFromInt(2),
+	})
+	assertError(t, err, "active swap already exists")
+	if secondReport == nil || secondReport.ResultSwapOrder == nil {
+		t.Fatalf("expected rejected duplicate report, got %v", secondReport)
+	}
+
+	result, err := s.ConsumeSubOrderResult(ctx, &models.Order{
+		ID:             firstReport.SubOrderToSend.ID,
+		Type:           models.OrderTypeMarket,
+		Status:         models.OrderStatusCompleted,
+		Symbol:         "BTC-USDT",
+		Side:           models.SideSell,
+		ExecutedAmount: decimal.NewFromInt(1),
+		ExecutedTotal:  decimal.NewFromInt(100),
+	})
+	if err != nil {
+		t.Fatalf("consume original suborder result: %v", err)
+	}
+	if result == nil || result.ResultSwapOrder == nil {
+		t.Fatalf("expected original swap to complete, got %v", result)
+	}
+	if result.ResultSwapOrder.ID != 77 || result.ResultSwapOrder.Status != models.OrderStatusCompleted {
+		t.Fatalf("original swap result mismatch: %+v", result.ResultSwapOrder)
 	}
 }
 
@@ -359,4 +510,34 @@ func (*LogMock) Error(component string, format string, a ...any) {
 
 func (*LogMock) Fatal(component string, format string, a ...any) {
 	log.Printf(fmt.Sprintf("| %-6s |%s", component, format), a...)
+}
+
+type consumeOrderLockCheckingStorage struct {
+	swapper           *Swapper
+	saved             bool
+	calledWhileLocked bool
+}
+
+func (s *consumeOrderLockCheckingStorage) SaveSwap(_ context.Context, _ *models.Swap) error {
+	s.saved = true
+	if !s.swapper.lock.TryLock() {
+		s.calledWhileLocked = true
+
+		return nil
+	}
+	s.swapper.lock.Unlock()
+
+	return nil
+}
+
+func (*consumeOrderLockCheckingStorage) GetAllSwaps(context.Context) ([]*models.Swap, error) {
+	return nil, nil
+}
+
+func (*consumeOrderLockCheckingStorage) DeleteSwap(context.Context, uint64) error {
+	return nil
+}
+
+func (*consumeOrderLockCheckingStorage) UpdateSwap(context.Context, *models.Swap) error {
+	return nil
 }

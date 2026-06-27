@@ -12,9 +12,15 @@ type Storage interface {
 
 // Logger receives diagnostic messages from the swap orchestration layer.
 type Logger interface {
+	// Debug logs diagnostic details useful while tracing swap execution.
 	Debug(component string, format string, a ...any)
+	// Info logs normal operational messages.
 	Info(component string, format string, a ...any)
+	// Warn logs recoverable unusual conditions.
 	Warn(component string, format string, a ...any)
+	// Error logs failures that do not stop the library flow.
 	Error(component string, format string, a ...any)
+	// Fatal logs a highest-severity message. Implementations are not required to
+	// terminate the process; swapper treats Fatal as a log level, not as os.Exit.
 	Fatal(component string, format string, a ...any)
 }

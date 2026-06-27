@@ -6,12 +6,14 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/orchidknight/swapper/markets"
 	"github.com/orchidknight/swapper/models"
 	"github.com/shopspring/decimal"
 )
 
 type staticMarketProvider struct {
 	swapPairs []*models.LinkedPairs
+	markets   map[models.Symbol]*models.MarketPair
 	err       error
 }
 
@@ -19,18 +21,25 @@ func (smp *staticMarketProvider) GetAllSwapPairs(models.Symbol) ([]*models.Linke
 	return smp.swapPairs, smp.err
 }
 
-func (*staticMarketProvider) GetMarket(models.Symbol) *models.MarketPair {
-	return nil
+func (smp *staticMarketProvider) GetMarket(symbol models.Symbol) *models.MarketPair {
+	return smp.markets[symbol]
 }
 
 func TestSwapper_AllSwapStepsFiltersEmptyPairs(t *testing.T) {
 	validPairs := &models.LinkedPairs{
+		Pairs: []models.Pair{{
+			Symbol:         "BTC-USDT",
+			BasePrecision:  models.PrecisionUnknown,
+			QuotePrecision: models.PrecisionUnknown,
+		}},
+	}
+	providerPairs := &models.LinkedPairs{
 		Pairs: []models.Pair{{Symbol: "BTC-USDT"}},
 	}
 	swapper := NewSwapper(&staticMarketProvider{
 		swapPairs: []*models.LinkedPairs{
 			{Pairs: nil},
-			validPairs,
+			providerPairs,
 			{Pairs: []models.Pair{}},
 		},
 	}, nil, nil)
@@ -43,6 +52,45 @@ func TestSwapper_AllSwapStepsFiltersEmptyPairs(t *testing.T) {
 	want := []*models.LinkedPairs{validPairs}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Fatalf("swap steps mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestSwapper_AllSwapStepsDoesNotMutateProviderLinkedPairs(t *testing.T) {
+	providerPairs := &models.LinkedPairs{
+		Pairs: []models.Pair{{
+			Symbol:         "BTC-USDT",
+			BasePrecision:  99,
+			QuotePrecision: 99,
+		}},
+	}
+	swapper := NewSwapper(&staticMarketProvider{
+		swapPairs: []*models.LinkedPairs{providerPairs},
+		markets: map[models.Symbol]*models.MarketPair{
+			"BTC-USDT": {
+				Symbol:         "BTC-USDT",
+				BasePrecision:  8,
+				QuotePrecision: 2,
+				TradingEnabled: true,
+			},
+		},
+	}, nil, nil)
+
+	got, err := swapper.AllSwapSteps(&models.Order{Symbol: "BTC-USDT"})
+	if err != nil {
+		t.Fatalf("all swap steps: %v", err)
+	}
+
+	if got[0].Pairs[0].BasePrecision != 8 || got[0].Pairs[0].QuotePrecision != 2 {
+		t.Fatalf("returned precision mismatch: got base=%d quote=%d, want base=8 quote=2",
+			got[0].Pairs[0].BasePrecision,
+			got[0].Pairs[0].QuotePrecision,
+		)
+	}
+	if providerPairs.Pairs[0].BasePrecision != 99 || providerPairs.Pairs[0].QuotePrecision != 99 {
+		t.Fatalf("provider pairs were mutated: got base=%d quote=%d, want base=99 quote=99",
+			providerPairs.Pairs[0].BasePrecision,
+			providerPairs.Pairs[0].QuotePrecision,
+		)
 	}
 }
 
@@ -67,6 +115,34 @@ func TestSwapper_ConsumeOrderDoesNotTruncateWhenMarketMetadataMissing(t *testing
 
 	// GetMarket returns nil here: precision is unknown, so the amount must be
 	// passed through untouched instead of being truncated to whole units.
+	if !report.SubOrderToSend.Amount.Equal(amount) {
+		t.Fatalf("suborder amount mismatch: got %s, want %s", report.SubOrderToSend.Amount, amount)
+	}
+	if !report.SubOrderToSend.AvailableAmount.Equal(amount) {
+		t.Fatalf("suborder available amount mismatch: got %s, want %s", report.SubOrderToSend.AvailableAmount, amount)
+	}
+}
+
+func TestSwapper_ConsumeOrderDoesNotTruncateNewMarketPairDefaultPrecision(t *testing.T) {
+	amount := mustDecimal(t, "1.23456789")
+	marketProvider := markets.New([]*models.MarketPair{
+		models.NewMarketPair("BTC-USDT", "BTC", "USDT", nil, 0),
+	})
+	swapper := NewSwapper(marketProvider, &MockedStorage{}, NewLogMock())
+
+	report, err := swapper.ConsumeOrder(context.Background(), &models.Order{
+		ID:              2,
+		Status:          models.OrderStatusNew,
+		Type:            models.OrderTypeSwap,
+		Symbol:          "BTC-USDT",
+		Side:            models.SideSell,
+		Amount:          amount,
+		AvailableAmount: amount,
+	})
+	if err != nil {
+		t.Fatalf("consume order: %v", err)
+	}
+
 	if !report.SubOrderToSend.Amount.Equal(amount) {
 		t.Fatalf("suborder amount mismatch: got %s, want %s", report.SubOrderToSend.Amount, amount)
 	}

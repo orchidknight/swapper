@@ -9,7 +9,9 @@ import (
 )
 
 const (
-	separator = "-"
+	separator           = "-"
+	defaultMaxPathHops  = 8
+	defaultMaxPathCount = 256
 )
 
 var (
@@ -22,7 +24,9 @@ var (
 
 // MarketService stores available markets and finds candidate paths between assets.
 type MarketService struct {
-	Markets map[models.Symbol]*models.MarketPair
+	Markets  map[models.Symbol]*models.MarketPair
+	MaxHops  int
+	MaxPaths int
 }
 
 type linkedMarket struct {
@@ -30,10 +34,20 @@ type linkedMarket struct {
 	market *models.MarketPair
 }
 
+type pathSearchState struct {
+	maxHops  int
+	maxPaths int
+	paths    int
+}
+
 // New builds a MarketService from a list of market pairs.
 func New(m []*models.MarketPair) *MarketService {
 	markets := make(map[models.Symbol]*models.MarketPair)
 	for i := range m {
+		if m[i] == nil {
+			continue
+		}
+
 		markets[m[i].Symbol] = m[i]
 	}
 
@@ -51,7 +65,7 @@ func (ms *MarketService) GetMarket(s models.Symbol) *models.MarketPair {
 func (ms *MarketService) GetAllSwapPairs(symbol models.Symbol) ([]*models.LinkedPairs, error) {
 	exceptions := make(map[string]struct{})
 	parts := strings.Split(symbol.String(), separator)
-	if len(parts) != 2 {
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return nil, ErrInvalidSwapPair
 	}
 
@@ -60,7 +74,7 @@ func (ms *MarketService) GetAllSwapPairs(symbol models.Symbol) ([]*models.Linked
 		return nil, ErrInvalidSwapPairSameAssets
 	}
 
-	allLinkedPairs := ms.findAllLinks(src, dst, exceptions)
+	allLinkedPairs := ms.findAllLinks(src, dst, exceptions, ms.newPathSearchState())
 	sortLinkedPairs(allLinkedPairs)
 
 	return allLinkedPairs, nil
@@ -69,6 +83,9 @@ func (ms *MarketService) GetAllSwapPairs(symbol models.Symbol) ([]*models.Linked
 func (ms *MarketService) linkedAssets(asset string, skip map[string]struct{}) []linkedMarket {
 	linkedMarkets := make(map[string]*models.MarketPair)
 	for _, market := range ms.Markets {
+		if market == nil {
+			continue
+		}
 		if !market.TradingEnabled {
 			continue
 		}
@@ -105,29 +122,62 @@ func (ms *MarketService) linkedAssets(asset string, skip map[string]struct{}) []
 	return result
 }
 
-func (ms *MarketService) findAllLinks(src, dst string, exceptions map[string]struct{}) []*models.LinkedPairs {
-	var results []*models.LinkedPairs
+func (ms *MarketService) findAllLinks(src, dst string, exceptions map[string]struct{}, state *pathSearchState) []*models.LinkedPairs {
+	if state.pathLimitReached() {
+		return nil
+	}
 
 	linkedAssets := ms.linkedAssets(dst, exceptions)
+	results := directLinkedPairs(src, linkedAssets, len(exceptions)+1, state)
+	results = append(results, ms.branchLinkedPairs(src, linkedAssets, exceptions, state)...)
+
+	return results
+}
+
+func directLinkedPairs(src string, linkedAssets []linkedMarket, pathLength int, state *pathSearchState) []*models.LinkedPairs {
+	var results []*models.LinkedPairs
 	for _, linkedAsset := range linkedAssets {
+		if state.pathLimitReached() {
+			break
+		}
 		if linkedAsset.asset != src {
 			continue
 		}
+		if !state.canUsePathLength(pathLength) {
+			continue
+		}
 
+		state.paths++
 		results = append(results, &models.LinkedPairs{
 			Pairs: []models.Pair{{Symbol: linkedAsset.market.Symbol}},
 		})
 	}
 
+	return results
+}
+
+func (ms *MarketService) branchLinkedPairs(
+	src string,
+	linkedAssets []linkedMarket,
+	exceptions map[string]struct{},
+	state *pathSearchState,
+) []*models.LinkedPairs {
+	var results []*models.LinkedPairs
 	for _, linkedAsset := range linkedAssets {
+		if state.pathLimitReached() {
+			break
+		}
 		if linkedAsset.asset == src {
 			continue
 		}
 
 		branchExceptions := copyExceptions(exceptions)
 		branchExceptions[linkedAsset.market.Symbol.String()] = struct{}{}
+		if !state.canRecurse(len(branchExceptions)) {
+			continue
+		}
 
-		linkedPairs := ms.findAllLinks(src, linkedAsset.asset, branchExceptions)
+		linkedPairs := ms.findAllLinks(src, linkedAsset.asset, branchExceptions, state)
 		for _, linkedPair := range linkedPairs {
 			linkedPair.Pairs = append(linkedPair.Pairs, models.Pair{Symbol: linkedAsset.market.Symbol})
 			results = append(results, linkedPair)
@@ -135,6 +185,36 @@ func (ms *MarketService) findAllLinks(src, dst string, exceptions map[string]str
 	}
 
 	return results
+}
+
+func (ms *MarketService) newPathSearchState() *pathSearchState {
+	return &pathSearchState{
+		maxHops:  normalizedLimit(ms.MaxHops, defaultMaxPathHops),
+		maxPaths: normalizedLimit(ms.MaxPaths, defaultMaxPathCount),
+	}
+}
+
+func normalizedLimit(value, defaultValue int) int {
+	if value < 0 {
+		return 0
+	}
+	if value == 0 {
+		return defaultValue
+	}
+
+	return value
+}
+
+func (s *pathSearchState) canUsePathLength(length int) bool {
+	return s.maxHops == 0 || length <= s.maxHops
+}
+
+func (s *pathSearchState) canRecurse(currentLength int) bool {
+	return s.maxHops == 0 || currentLength < s.maxHops
+}
+
+func (s *pathSearchState) pathLimitReached() bool {
+	return s.maxPaths > 0 && s.paths >= s.maxPaths
 }
 
 func copyExceptions(exceptions map[string]struct{}) map[string]struct{} {

@@ -13,7 +13,7 @@ const assetSeparator = "-"
 // NewSymbol validates and returns a Symbol in BASE-QUOTE form.
 func NewSymbol(s string) (Symbol, error) {
 	parts := strings.Split(s, assetSeparator)
-	if len(parts) != 2 {
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", fmt.Errorf("wrong symbol format %s", s)
 	}
 
@@ -45,14 +45,22 @@ func (s Symbol) QuoteAsset() string {
 
 // MarketPair describes a tradable market and its precision metadata.
 type MarketPair struct {
-	Symbol         Symbol
-	Base           string
-	Quote          string
-	Exchange       map[string]struct{}
+	Symbol Symbol
+	Base   string
+	Quote  string
+
+	// Exchange is optional caller-owned venue metadata. Path discovery does not
+	// filter by exchange; callers that need venue constraints should provide a
+	// MarketProvider already scoped to the intended venue set.
+	Exchange map[string]struct{}
+
 	BasePrecision  int32
 	QuotePrecision int32
 	TradingEnabled bool
-	SecurityType   int32
+
+	// SecurityType is optional caller-owned market classification metadata.
+	// swapper stores it for consumers but does not use it when building paths.
+	SecurityType int32
 }
 
 // HasAndReturnAnother reports whether asset belongs to the pair and returns the opposite asset.
@@ -68,12 +76,18 @@ func (mp MarketPair) HasAndReturnAnother(asset string) (bool, string) {
 }
 
 // NewMarketPair constructs an enabled MarketPair from raw metadata.
+//
+// Precision defaults to PrecisionUnknown so callers do not accidentally truncate
+// fractional quantities to whole units when exchange precision metadata is not
+// available.
 func NewMarketPair(pair string, base string, quote string, exchanges map[string]struct{}, st int32) *MarketPair {
 	return &MarketPair{
 		Symbol:         Symbol(pair),
 		Base:           base,
 		Quote:          quote,
 		Exchange:       exchanges,
+		BasePrecision:  PrecisionUnknown,
+		QuotePrecision: PrecisionUnknown,
 		SecurityType:   st,
 		TradingEnabled: true,
 	}

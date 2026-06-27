@@ -58,6 +58,62 @@ func TestSwapper_ConsumeSubOrderResult(t *testing.T) {
 				},
 			},
 		},
+		"two phase swap sell then buy: reject second step leaves stranded intermediate asset": {
+			inputOrder: &models.Order{
+				ID:              1,
+				Type:            models.OrderTypeSwap,
+				Symbol:          "SHIB-DOGE",
+				Side:            models.SideSell,
+				AvailableAmount: decimal.NewFromFloat(100),
+				Amount:          decimal.NewFromFloat(100),
+			},
+			inputSubOrderResults: []*models.Order{
+				{
+					Side:            models.SideSell,
+					Status:          models.OrderStatusCompleted,
+					Symbol:          "SHIB-USDT",
+					ExecutedAmount:  decimal.NewFromFloat(100),
+					AvailableAmount: decimal.Zero,
+					Amount:          decimal.NewFromFloat(100),
+					AvgPrice:        decimal.NewFromFloat(10),
+					ExecutedTotal:   decimal.NewFromFloat(1000),
+				},
+				{
+					Side:         models.SideBuy,
+					Status:       models.OrderStatusRejected,
+					Symbol:       "DOGE-USDT",
+					RejectReason: models.RejectReasonNotEnoughLiquidity,
+				},
+			},
+			inputMarketService: &markets.MarketService{
+				Markets: inputTwoPhaseMarkets,
+			},
+			wantSwapReports: []*models.SwapperReport{
+				{
+					SubOrderToSend: &models.Order{
+						Side:           models.SideBuy,
+						AvailableTotal: decimal.NewFromFloat(1000),
+						Symbol:         "DOGE-USDT",
+						Type:           models.OrderTypeMarket,
+						Status:         models.OrderStatusNew,
+					},
+				},
+				{
+					ResultSwapOrder: &models.Order{
+						ID:              1,
+						Status:          models.OrderStatusRejected,
+						Symbol:          "SHIB-DOGE",
+						Type:            models.OrderTypeSwap,
+						Side:            models.SideSell,
+						Amount:          decimal.NewFromFloat(100),
+						AvailableAmount: decimal.NewFromFloat(100),
+						RejectReason:    models.RejectReasonNotEnoughLiquidity,
+						StrandedAmount:  decimal.NewFromFloat(1000),
+						StrandedAsset:   "USDT",
+					},
+				},
+			},
+		},
 		"two phase swap sell then buy: reject first step, rerouting": {
 			inputOrder: &models.Order{
 				ID:              1,
@@ -415,6 +471,55 @@ func TestSwapper_LoadOrdersRestoresOutstandingSubOrder(t *testing.T) {
 	}
 	if result.ResultSwapOrder.Status != models.OrderStatusCompleted {
 		t.Fatalf("swap order status mismatch: got %s, want %s", result.ResultSwapOrder.Status, models.OrderStatusCompleted)
+	}
+}
+
+func TestSwapper_LoadOrdersRebuildsIndexesAtomically(t *testing.T) {
+	ctx := context.Background()
+	storage := newMemoryStorage()
+	s := NewSwapper(&markets.MarketService{Markets: inputOnePhaseMarkets}, storage, NewLogMock())
+
+	staleSwap := models.NewSwap(&models.Order{
+		ID:              501,
+		Type:            models.OrderTypeSwap,
+		Symbol:          "BTC-USDT",
+		Side:            models.SideSell,
+		Amount:          decimal.NewFromInt(1),
+		AvailableAmount: decimal.NewFromInt(1),
+	}, []*models.LinkedPairs{{Pairs: []models.Pair{{Symbol: "BTC-USDT"}}}})
+	staleSubOrder, err := staleSwap.NextStepOrder()
+	if err != nil {
+		t.Fatalf("stale next step order: %v", err)
+	}
+	s.activeSwaps[staleSwap.ID] = staleSwap
+	s.orders[staleSubOrder.ID] = staleSwap.ID
+
+	freshSwap := models.NewSwap(&models.Order{
+		ID:              502,
+		Type:            models.OrderTypeSwap,
+		Symbol:          "BTC-USDT",
+		Side:            models.SideSell,
+		Amount:          decimal.NewFromInt(2),
+		AvailableAmount: decimal.NewFromInt(2),
+	}, []*models.LinkedPairs{{Pairs: []models.Pair{{Symbol: "BTC-USDT"}}}})
+	freshSubOrder, err := freshSwap.NextStepOrder()
+	if err != nil {
+		t.Fatalf("fresh next step order: %v", err)
+	}
+	storage.swaps[freshSwap.ID] = freshSwap
+
+	if err := s.LoadOrders(ctx); err != nil {
+		t.Fatalf("load orders: %v", err)
+	}
+
+	if _, ok := s.activeSwaps[staleSwap.ID]; ok {
+		t.Fatal("stale active swap was not removed")
+	}
+	if _, ok := s.orders[staleSubOrder.ID]; ok {
+		t.Fatal("stale suborder mapping was not removed")
+	}
+	if got := s.orders[freshSubOrder.ID]; got != freshSwap.ID {
+		t.Fatalf("fresh suborder mapping mismatch: got %d, want %d", got, freshSwap.ID)
 	}
 }
 

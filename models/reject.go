@@ -15,4 +15,7 @@ const (
 
 	// RejectReasonBuySwapsNotSupported means buy swaps by target output are deferred.
 	RejectReasonBuySwapsNotSupported = "Buy swaps not supported"
+
+	// RejectReasonInvalidOrder means the input order violates swapper boundary invariants.
+	RejectReasonInvalidOrder = "Invalid order"
 )

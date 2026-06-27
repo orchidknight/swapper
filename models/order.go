@@ -85,6 +85,9 @@ type Order struct {
 	Price    decimal.Decimal `json:"price"`
 	AvgPrice decimal.Decimal `json:"avgPrice"`
 
+	StrandedAmount decimal.Decimal `json:"strandedAmount"`
+	StrandedAsset  string          `json:"strandedAsset"`
+
 	CreatedAt time.Time `json:"createdAt"`
 }
 

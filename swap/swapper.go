@@ -75,10 +75,9 @@ func (s *Swapper) AllSwapSteps(o *models.Order) ([]*models.LinkedPairs, error) {
 	if err != nil {
 		return nil, fmt.Errorf("GetAllSwapPairs: can't get swap pairs for %s: %w", o.Symbol, err)
 	}
-	for _, lp := range steps {
-		if len(lp.Pairs) != 0 {
-			s.applyMarketPrecision(lp)
-			validSwapSteps = append(validSwapSteps, lp)
+	for _, linkedPairs := range steps {
+		if linkedPairs != nil && len(linkedPairs.Pairs) != 0 {
+			validSwapSteps = append(validSwapSteps, s.applyMarketPrecision(linkedPairs))
 		}
 	}
 
@@ -89,21 +88,27 @@ func (s *Swapper) AllSwapSteps(o *models.Order) ([]*models.LinkedPairs, error) {
 	return validSwapSteps, nil
 }
 
-func (s *Swapper) applyMarketPrecision(linkedPairs *models.LinkedPairs) {
-	for i, pair := range linkedPairs.Pairs {
+func (s *Swapper) applyMarketPrecision(linkedPairs *models.LinkedPairs) *models.LinkedPairs {
+	linkedPairsWithPrecision := &models.LinkedPairs{
+		Pairs: append([]models.Pair(nil), linkedPairs.Pairs...),
+	}
+
+	for i, pair := range linkedPairsWithPrecision.Pairs {
 		market := s.markets.GetMarket(pair.Symbol)
 		if market == nil {
 			// Unknown precision: mark as -1 so amounts pass through untouched
 			// instead of being truncated to whole units.
-			linkedPairs.Pairs[i].BasePrecision = models.PrecisionUnknown
-			linkedPairs.Pairs[i].QuotePrecision = models.PrecisionUnknown
+			linkedPairsWithPrecision.Pairs[i].BasePrecision = models.PrecisionUnknown
+			linkedPairsWithPrecision.Pairs[i].QuotePrecision = models.PrecisionUnknown
 
 			continue
 		}
 
-		linkedPairs.Pairs[i].BasePrecision = market.BasePrecision
-		linkedPairs.Pairs[i].QuotePrecision = market.QuotePrecision
+		linkedPairsWithPrecision.Pairs[i].BasePrecision = market.BasePrecision
+		linkedPairsWithPrecision.Pairs[i].QuotePrecision = market.QuotePrecision
 	}
+
+	return linkedPairsWithPrecision
 }
 
 func (s *Swapper) findSwapByOrder(id uint64) (*models.Swap, error) {
@@ -124,36 +129,87 @@ func (s *Swapper) findSwapByOrder(id uint64) (*models.Swap, error) {
 }
 
 // LoadOrders restores active swaps from Storage.
+//
+// The in-memory indexes are rebuilt atomically from storage. Only in-progress
+// step orders are treated as outstanding suborders.
 func (s *Swapper) LoadOrders(ctx context.Context) error {
 	activeSwaps, err := s.storage.GetAllSwaps(ctx)
 	if err != nil {
 		return fmt.Errorf("GetAllSwaps: %w", err)
 	}
 
+	loadedActiveSwaps, loadedOrders, err := buildLoadedSwapIndexes(activeSwaps)
+	if err != nil {
+		return err
+	}
+
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	for _, activeSwap := range activeSwaps {
-		if activeSwap == nil {
-			continue
-		}
-
-		s.activeSwaps[activeSwap.ID] = activeSwap
-
-		for _, step := range activeSwap.Steps {
-			if step == nil || step.Order == nil {
-				continue
-			}
-
-			if step.Status == models.StepStatusInProgress || step.Status == models.StepStatusNew {
-				s.orders[step.Order.ID] = activeSwap.ID
-			}
-		}
-	}
+	s.activeSwaps = loadedActiveSwaps
+	s.orders = loadedOrders
 
 	if s.log != nil {
 		s.log.Debug("swapper", "loaded swaps: %d", len(activeSwaps))
 	}
+
+	return nil
+}
+
+func buildLoadedSwapIndexes(activeSwaps []*models.Swap) (map[uint64]*models.Swap, map[uint64]uint64, error) {
+	loadedActiveSwaps := make(map[uint64]*models.Swap, len(activeSwaps))
+	loadedOrders := make(map[uint64]uint64)
+	for _, activeSwap := range activeSwaps {
+		if err := indexLoadedSwap(loadedActiveSwaps, loadedOrders, activeSwap); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	return loadedActiveSwaps, loadedOrders, nil
+}
+
+func indexLoadedSwap(
+	loadedActiveSwaps map[uint64]*models.Swap,
+	loadedOrders map[uint64]uint64,
+	activeSwap *models.Swap,
+) error {
+	if activeSwap == nil {
+		return nil
+	}
+	if activeSwap.ID == 0 {
+		return fmt.Errorf("LoadOrders: swap id must be non-zero")
+	}
+	if _, exists := loadedActiveSwaps[activeSwap.ID]; exists {
+		return fmt.Errorf("LoadOrders: duplicate swap id %d", activeSwap.ID)
+	}
+
+	loadedActiveSwaps[activeSwap.ID] = activeSwap
+
+	return indexOutstandingOrders(loadedOrders, activeSwap)
+}
+
+func indexOutstandingOrders(loadedOrders map[uint64]uint64, activeSwap *models.Swap) error {
+	for _, step := range activeSwap.Steps {
+		if err := indexOutstandingStep(loadedOrders, activeSwap.ID, step); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func indexOutstandingStep(loadedOrders map[uint64]uint64, swapID uint64, step *models.Step) error {
+	if step == nil || step.Order == nil || step.Status != models.StepStatusInProgress {
+		return nil
+	}
+	if step.Order.ID == 0 {
+		return fmt.Errorf("LoadOrders: suborder id must be non-zero for swap %d", swapID)
+	}
+	if existingSwapID, exists := loadedOrders[step.Order.ID]; exists && existingSwapID != swapID {
+		return fmt.Errorf("LoadOrders: duplicate suborder id %d", step.Order.ID)
+	}
+
+	loadedOrders[step.Order.ID] = swapID
 
 	return nil
 }

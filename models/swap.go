@@ -109,12 +109,13 @@ func (s *Step) Update(o *Order) {
 		s.Status = StepStatusCanceled
 	}
 
-	if s.Type == SwapTypeBuyThenSell {
-		// not supported, see spec §10
-		s.Status = StepStatusRejected
-
-		return
-	}
+	// TODO(buy-swaps): restore this guard when buy-then-sell domain flow is implemented.
+	// if s.Type == SwapTypeBuyThenSell {
+	// 	// not supported, see spec §10
+	// 	s.Status = StepStatusRejected
+	//
+	// 	return
+	// }
 
 	switch s.Side {
 	case SideBuy:
@@ -152,16 +153,30 @@ func (s *Swap) Update(o *Order) bool {
 	s.Steps[stepIndex].Update(o)
 	s.CurrentStep = stepIndex
 	currentStep := s.Steps[stepIndex]
+	if currentStep.Status == StepStatusCompleted ||
+		currentStep.Status == StepStatusRejected ||
+		currentStep.Status == StepStatusCanceled {
+		delete(s.SubOrders, o.ID)
+	}
 
-	if s.Type == SwapTypeBuyThenSell {
-		// not supported, see spec §10
-		s.rejectSwap(RejectReasonBuySwapsNotSupported)
+	// TODO(buy-swaps): restore this guard when buy-then-sell domain flow is implemented.
+	// if s.Type == SwapTypeBuyThenSell {
+	// 	// not supported, see spec §10
+	// 	s.rejectSwap(RejectReasonBuySwapsNotSupported)
+	//
+	// 	return true
+	// }
+
+	if currentStep.Status == StepStatusCompleted && !currentStep.hasExecutedMatch() {
+		s.captureTerminalStrandedAsset(stepIndex)
+		s.rejectSwap(RejectReasonNoMatches)
 
 		return true
 	}
 
 	switch currentStep.Status {
 	case StepStatusCanceled:
+		s.captureTerminalStrandedAsset(stepIndex)
 		s.cancelSwap()
 
 		return true
@@ -195,13 +210,14 @@ func (s *Swap) completeSwap() {
 	s.Order.Status = OrderStatusCompleted
 
 	// Для sell-свапа amount — потраченный входящий актив, total — полученный конечный актив.
-	// Buy-свапы не поддержаны, см. spec §10.
-	switch s.Order.Side {
-	case SideSell:
-		s.completeSellSwap(firstStep, lastStep)
-	case SideBuy:
-		s.rejectSwap(RejectReasonBuySwapsNotSupported)
-	}
+	// TODO(buy-swaps): restore side-specific completion when buy swaps leave the boundary-only reject state.
+	// switch s.Order.Side {
+	// case SideSell:
+	// 	s.completeSellSwap(firstStep, lastStep)
+	// case SideBuy:
+	// 	s.rejectSwap(RejectReasonBuySwapsNotSupported)
+	// }
+	s.completeSellSwap(firstStep, lastStep)
 }
 
 func (s *Swap) completeSellSwap(firstStep, lastStep *Step) {
@@ -226,7 +242,44 @@ func (s *Swap) handleRejectedStep(o *Order, stepIndex int) {
 		return
 	}
 
+	s.captureTerminalStrandedAsset(stepIndex)
 	s.rejectSwap(rejectReasonOrUnspecified(o.RejectReason))
+}
+
+func (s *Step) hasExecutedMatch() bool {
+	return s.SpentAmount.GreaterThan(decimal.Zero) && s.ReceivedAmount.GreaterThan(decimal.Zero)
+}
+
+func (s *Swap) captureTerminalStrandedAsset(stepIndex int) {
+	if stepIndex < 0 || stepIndex >= len(s.Steps) {
+		return
+	}
+
+	currentStep := s.Steps[stepIndex]
+	if stepIndex == 0 {
+		s.captureStrandedAmount(currentStep.ReceivedAmount, currentStep.ReceivedAsset)
+
+		return
+	}
+
+	previousStep := s.Steps[stepIndex-1]
+	unspentPreviousAmount := previousStep.ReceivedAmount.Sub(currentStep.SpentAmount)
+	if unspentPreviousAmount.GreaterThan(decimal.Zero) {
+		s.captureStrandedAmount(unspentPreviousAmount, previousStep.ReceivedAsset)
+
+		return
+	}
+
+	s.captureStrandedAmount(currentStep.ReceivedAmount, currentStep.ReceivedAsset)
+}
+
+func (s *Swap) captureStrandedAmount(amount decimal.Decimal, asset string) {
+	if !amount.GreaterThan(decimal.Zero) || asset == "" {
+		return
+	}
+
+	s.Order.StrandedAmount = amount
+	s.Order.StrandedAsset = asset
 }
 
 func (s *Swap) rerouteFirstStep(stepIndex int) {
@@ -424,10 +477,11 @@ func swapType(o *Order) SwapType {
 }
 
 func swapSteps(initialSymbol string, s []Pair, swapType SwapType) []*Step {
-	if swapType != SwapTypeSellThenBuy {
-		// not supported, see spec §10
-		return nil
-	}
+	// TODO(buy-swaps): restore this guard when swapSteps has a real buy-then-sell implementation.
+	// if swapType != SwapTypeSellThenBuy {
+	// 	// not supported, see spec §10
+	// 	return nil
+	// }
 
 	swapSymbol := Symbol(initialSymbol)
 	currentAsset := swapSymbol.BaseAsset()

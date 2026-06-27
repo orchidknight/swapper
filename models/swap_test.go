@@ -419,6 +419,95 @@ func TestSwapUpdateRejectsZeroExecutedAmountWithoutPanic(t *testing.T) {
 	}
 }
 
+func TestSwapUpdateRejectsZeroFillFinalStep(t *testing.T) {
+	swapOrder := &Order{
+		ID:              1,
+		Account:         "account",
+		Type:            OrderTypeSwap,
+		Symbol:          "BTC-DOGE",
+		Side:            SideSell,
+		Amount:          decimal.NewFromInt(1),
+		AvailableAmount: decimal.NewFromInt(1),
+	}
+	swap := NewSwap(swapOrder, []*LinkedPairs{{
+		Pairs: []Pair{{Symbol: "BTC-USDT"}, {Symbol: "DOGE-USDT"}},
+	}})
+
+	firstSubOrder, err := swap.NextStepOrder()
+	if err != nil {
+		t.Fatalf("first next step order: %v", err)
+	}
+	completedFirst := *firstSubOrder
+	completedFirst.Status = OrderStatusCompleted
+	completedFirst.ExecutedAmount = decimal.NewFromInt(1)
+	completedFirst.ExecutedTotal = decimal.NewFromInt(100)
+	if !swap.Update(&completedFirst) {
+		t.Fatal("expected first Update to accept the suborder result")
+	}
+
+	secondSubOrder, err := swap.NextStepOrder()
+	if err != nil {
+		t.Fatalf("second next step order: %v", err)
+	}
+	completedSecond := *secondSubOrder
+	completedSecond.Status = OrderStatusCompleted
+	completedSecond.ExecutedAmount = decimal.Zero
+	completedSecond.ExecutedTotal = decimal.Zero
+	if !swap.Update(&completedSecond) {
+		t.Fatal("expected second Update to accept the suborder result")
+	}
+
+	if swap.Status != SwapStatusRejected {
+		t.Fatalf("status mismatch: got %s, want %s", swap.Status, SwapStatusRejected)
+	}
+	if swap.Order.RejectReason != RejectReasonNoMatches {
+		t.Fatalf("reject reason mismatch: got %s, want %s", swap.Order.RejectReason, RejectReasonNoMatches)
+	}
+	if !swap.Order.StrandedAmount.Equal(decimal.NewFromInt(100)) {
+		t.Fatalf("stranded amount mismatch: got %s, want 100", swap.Order.StrandedAmount)
+	}
+	if swap.Order.StrandedAsset != "USDT" {
+		t.Fatalf("stranded asset mismatch: got %s, want USDT", swap.Order.StrandedAsset)
+	}
+}
+
+func TestSwapUpdateCapturesPartialFirstStepCancel(t *testing.T) {
+	swapOrder := &Order{
+		ID:              1,
+		Account:         "account",
+		Type:            OrderTypeSwap,
+		Symbol:          "BTC-DOGE",
+		Side:            SideSell,
+		Amount:          decimal.NewFromInt(1),
+		AvailableAmount: decimal.NewFromInt(1),
+	}
+	swap := NewSwap(swapOrder, []*LinkedPairs{{
+		Pairs: []Pair{{Symbol: "BTC-USDT"}, {Symbol: "DOGE-USDT"}},
+	}})
+
+	firstSubOrder, err := swap.NextStepOrder()
+	if err != nil {
+		t.Fatalf("first next step order: %v", err)
+	}
+	partialCancel := *firstSubOrder
+	partialCancel.Status = OrderStatusCanceled
+	partialCancel.ExecutedAmount = mustDecimal(t, "0.5")
+	partialCancel.ExecutedTotal = decimal.NewFromInt(50)
+	if !swap.Update(&partialCancel) {
+		t.Fatal("expected Update to accept the suborder result")
+	}
+
+	if swap.Status != SwapStatusCanceled {
+		t.Fatalf("status mismatch: got %s, want %s", swap.Status, SwapStatusCanceled)
+	}
+	if !swap.Order.StrandedAmount.Equal(decimal.NewFromInt(50)) {
+		t.Fatalf("stranded amount mismatch: got %s, want 50", swap.Order.StrandedAmount)
+	}
+	if swap.Order.StrandedAsset != "USDT" {
+		t.Fatalf("stranded asset mismatch: got %s, want USDT", swap.Order.StrandedAsset)
+	}
+}
+
 func TestSwapUpdateStateTransitions(t *testing.T) {
 	tests := map[string]struct {
 		arrange func(*testing.T) (*Swap, *Order)
@@ -707,6 +796,9 @@ func assertReroutedFirstStep(t *testing.T, activeSwap *Swap) {
 	if activeSwap.RejectedSteps[0].Status != StepStatusRejected {
 		t.Fatalf("rejected step status mismatch: got %s, want %s", activeSwap.RejectedSteps[0].Status, StepStatusRejected)
 	}
+	if len(activeSwap.SubOrders) != 0 {
+		t.Fatalf("suborders should not retain stale IDs after reroute, got %d", len(activeSwap.SubOrders))
+	}
 	for _, step := range activeSwap.Steps {
 		if step.Status != StepStatusNew {
 			t.Fatalf("rerouted step status mismatch: got %s, want %s", step.Status, StepStatusNew)
@@ -735,6 +827,12 @@ func assertNonFirstStepRejectedSwap(t *testing.T, activeSwap *Swap) {
 	assertRejectedSwap(t, activeSwap, RejectReasonNotEnoughLiquidity)
 	if activeSwap.CurrentStep != 1 {
 		t.Fatalf("current step mismatch: got %d, want 1", activeSwap.CurrentStep)
+	}
+	if !activeSwap.Order.StrandedAmount.Equal(decimal.NewFromInt(20)) {
+		t.Fatalf("stranded amount mismatch: got %s, want 20", activeSwap.Order.StrandedAmount)
+	}
+	if activeSwap.Order.StrandedAsset != "USDT" {
+		t.Fatalf("stranded asset mismatch: got %s, want USDT", activeSwap.Order.StrandedAsset)
 	}
 }
 

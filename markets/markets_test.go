@@ -85,6 +85,18 @@ func TestMarketService_GetSwapPairs(t *testing.T) {
 			wantPairs:    nil,
 			wantErr:      ErrInvalidSwapPair,
 		},
+		"invalid symbol with empty source": {
+			inputSymbol:  "-USDT",
+			inputMarkets: inputManyMarkets,
+			wantPairs:    nil,
+			wantErr:      ErrInvalidSwapPair,
+		},
+		"invalid symbol with empty destination": {
+			inputSymbol:  "PEPE-",
+			inputMarkets: inputManyMarkets,
+			wantPairs:    nil,
+			wantErr:      ErrInvalidSwapPair,
+		},
 	}
 
 	for name, tc := range tests {
@@ -104,6 +116,65 @@ func TestMarketService_GetSwapPairs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMarketService_NewSkipsNilMarkets(t *testing.T) {
+	marketService := New([]*models.MarketPair{
+		nil,
+		{Symbol: "BTC-USDT", Base: "BTC", Quote: "USDT", TradingEnabled: true},
+	})
+
+	got, err := marketService.GetAllSwapPairs("BTC-USDT")
+	if err != nil {
+		t.Fatalf("get swap pairs: %v", err)
+	}
+	want := []*models.LinkedPairs{{Pairs: []models.Pair{{Symbol: "BTC-USDT"}}}}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("swap pairs mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestMarketService_GetSwapPairsRespectsLimits(t *testing.T) {
+	t.Run("max hops", func(t *testing.T) {
+		ms := MarketService{
+			Markets: map[models.Symbol]*models.MarketPair{
+				"AAA-BBB": {Symbol: "AAA-BBB", Base: "AAA", Quote: "BBB", TradingEnabled: true},
+				"BBB-CCC": {Symbol: "BBB-CCC", Base: "BBB", Quote: "CCC", TradingEnabled: true},
+			},
+			MaxHops: 1,
+		}
+
+		got, err := ms.GetAllSwapPairs("AAA-CCC")
+		if err != nil {
+			t.Fatalf("get swap pairs: %v", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("paths count mismatch: got %d, want 0", len(got))
+		}
+	})
+
+	t.Run("max paths", func(t *testing.T) {
+		ms := MarketService{
+			Markets: map[models.Symbol]*models.MarketPair{
+				"AAA-BBB": {Symbol: "AAA-BBB", Base: "AAA", Quote: "BBB", TradingEnabled: true},
+				"AAA-CCC": {Symbol: "AAA-CCC", Base: "AAA", Quote: "CCC", TradingEnabled: true},
+				"BBB-DDD": {Symbol: "BBB-DDD", Base: "BBB", Quote: "DDD", TradingEnabled: true},
+				"CCC-DDD": {Symbol: "CCC-DDD", Base: "CCC", Quote: "DDD", TradingEnabled: true},
+			},
+			MaxPaths: 1,
+		}
+
+		got, err := ms.GetAllSwapPairs("AAA-DDD")
+		if err != nil {
+			t.Fatalf("get swap pairs: %v", err)
+		}
+		want := []*models.LinkedPairs{
+			{Pairs: []models.Pair{{Symbol: "AAA-BBB"}, {Symbol: "BBB-DDD"}}},
+		}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Fatalf("swap pairs mismatch (-want +got):\n%s", diff)
+		}
+	})
 }
 
 func TestMarketService_GetSwapPairsDeterministic(t *testing.T) {
