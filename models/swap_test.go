@@ -1,6 +1,7 @@
 package models
 
 import (
+	"reflect"
 	"sync"
 	"testing"
 
@@ -418,6 +419,79 @@ func TestSwapUpdateRejectsZeroExecutedAmountWithoutPanic(t *testing.T) {
 	}
 }
 
+func TestSwapUpdateStateTransitions(t *testing.T) {
+	tests := map[string]struct {
+		arrange func(*testing.T) (*Swap, *Order)
+		assert  func(*testing.T, *Swap)
+	}{
+		"reroutes rejected first step to next path": {
+			arrange: arrangeRejectedFirstStepWithFallbackPath,
+			assert:  assertReroutedFirstStep,
+		},
+		"rejects rejected first step without fallback paths": {
+			arrange: arrangeRejectedFirstStepWithoutFallbackPath,
+			assert:  assertNotEnoughLiquidityRejectedSwap,
+		},
+		"rejects rejected first step when fallback path cannot be built": {
+			arrange: arrangeRejectedFirstStepWithInvalidFallbackPath,
+			assert:  assertInvalidFallbackRejectedSwap,
+		},
+		"rejects rejected non-first step": {
+			arrange: arrangeRejectedNonFirstStep,
+			assert:  assertNonFirstStepRejectedSwap,
+		},
+		"cancels canceled step": {
+			arrange: arrangeCanceledStep,
+			assert:  assertCanceledSwap,
+		},
+		"rejects completed first step with zero executed amount": {
+			arrange: arrangeZeroVolumeCompletedFirstStep,
+			assert:  assertNoMatchesRejectedSwap,
+		},
+	}
+
+	for name, testCase := range tests {
+		t.Run(name, func(t *testing.T) {
+			activeSwap, subOrderResult := testCase.arrange(t)
+			if !activeSwap.Update(subOrderResult) {
+				t.Fatal("expected Update to accept the suborder result")
+			}
+
+			testCase.assert(t, activeSwap)
+		})
+	}
+}
+
+func TestSwapTypeFromOrderSide(t *testing.T) {
+	tests := map[string]struct {
+		side     Side
+		wantType SwapType
+	}{
+		"sell": {
+			side:     SideSell,
+			wantType: SwapTypeSellThenBuy,
+		},
+		"buy": {
+			side:     SideBuy,
+			wantType: SwapTypeBuyThenSell,
+		},
+		"unspecified": {
+			side:     SideUnspecified,
+			wantType: SwapTypeUnspecified,
+		},
+	}
+
+	for name, testCase := range tests {
+		t.Run(name, func(t *testing.T) {
+			swapOrder := &Order{Side: testCase.side}
+
+			if gotType := swapType(swapOrder); gotType != testCase.wantType {
+				t.Fatalf("swap type mismatch: got %s, want %s", gotType, testCase.wantType)
+			}
+		})
+	}
+}
+
 func TestSwapUpdateAndNextStepOrderAreRaceSafe(t *testing.T) {
 	swapOrder := &Order{
 		ID:              1,
@@ -480,4 +554,220 @@ func TestSwapUpdateAndNextStepOrderAreRaceSafe(t *testing.T) {
 
 	close(start)
 	wg.Wait()
+}
+
+func arrangeRejectedFirstStepWithFallbackPath(t *testing.T) (*Swap, *Order) {
+	t.Helper()
+
+	activeSwap := newStateMachineTestSwap(t, "BTC-USDT", []*LinkedPairs{
+		{Pairs: []Pair{{Symbol: "BTC-USDT"}}},
+		{Pairs: []Pair{{Symbol: "BTC-ETH"}, {Symbol: "ETH-USDT"}}},
+	})
+	subOrder := nextStateMachineSubOrder(t, activeSwap)
+
+	return activeSwap, rejectedStateMachineSubOrder(subOrder)
+}
+
+func arrangeRejectedFirstStepWithoutFallbackPath(t *testing.T) (*Swap, *Order) {
+	t.Helper()
+
+	activeSwap := newStateMachineTestSwap(t, "BTC-USDT", []*LinkedPairs{
+		{Pairs: []Pair{{Symbol: "BTC-USDT"}}},
+	})
+	subOrder := nextStateMachineSubOrder(t, activeSwap)
+
+	return activeSwap, rejectedStateMachineSubOrder(subOrder)
+}
+
+func arrangeRejectedFirstStepWithInvalidFallbackPath(t *testing.T) (*Swap, *Order) {
+	t.Helper()
+
+	activeSwap := newStateMachineTestSwap(t, "BTC-USDT", []*LinkedPairs{
+		{Pairs: []Pair{{Symbol: "BTC-USDT"}}},
+		{Pairs: []Pair{{Symbol: "BTC-ETH"}, {Symbol: "DOGE-USDT"}}},
+	})
+	subOrder := nextStateMachineSubOrder(t, activeSwap)
+
+	return activeSwap, rejectedStateMachineSubOrder(subOrder)
+}
+
+func arrangeRejectedNonFirstStep(t *testing.T) (*Swap, *Order) {
+	t.Helper()
+
+	activeSwap := newStateMachineTestSwap(t, "SOL-PEPE", []*LinkedPairs{
+		{Pairs: []Pair{{Symbol: "SOL-USDT"}, {Symbol: "PEPE-USDT"}}},
+	})
+	firstSubOrder := nextStateMachineSubOrder(t, activeSwap)
+	if !activeSwap.Update(completedStateMachineSubOrder(firstSubOrder, decimal.NewFromInt(10), decimal.NewFromInt(20))) {
+		t.Fatal("expected first Update to accept the suborder result")
+	}
+	secondSubOrder := nextStateMachineSubOrder(t, activeSwap)
+
+	return activeSwap, rejectedStateMachineSubOrder(secondSubOrder)
+}
+
+func arrangeCanceledStep(t *testing.T) (*Swap, *Order) {
+	t.Helper()
+
+	activeSwap := newStateMachineTestSwap(t, "BTC-USDT", []*LinkedPairs{
+		{Pairs: []Pair{{Symbol: "BTC-USDT"}}},
+	})
+	subOrder := nextStateMachineSubOrder(t, activeSwap)
+
+	return activeSwap, canceledStateMachineSubOrder(subOrder)
+}
+
+func arrangeZeroVolumeCompletedFirstStep(t *testing.T) (*Swap, *Order) {
+	t.Helper()
+
+	activeSwap := newStateMachineTestSwap(t, "BTC-USDT", []*LinkedPairs{
+		{Pairs: []Pair{{Symbol: "BTC-USDT"}}},
+	})
+	subOrder := nextStateMachineSubOrder(t, activeSwap)
+
+	return activeSwap, completedStateMachineSubOrder(subOrder, decimal.Zero, decimal.Zero)
+}
+
+func newStateMachineTestSwap(t *testing.T, symbol Symbol, paths []*LinkedPairs) *Swap {
+	t.Helper()
+
+	swapOrder := &Order{
+		ID:              1,
+		Account:         "account",
+		Type:            OrderTypeSwap,
+		Symbol:          symbol,
+		Side:            SideSell,
+		Amount:          decimal.NewFromInt(10),
+		AvailableAmount: decimal.NewFromInt(10),
+	}
+	activeSwap := NewSwap(swapOrder, paths)
+	if activeSwap == nil {
+		t.Fatal("expected swap to be created")
+	}
+
+	return activeSwap
+}
+
+func nextStateMachineSubOrder(t *testing.T, activeSwap *Swap) *Order {
+	t.Helper()
+
+	subOrder, err := activeSwap.NextStepOrder()
+	if err != nil {
+		t.Fatalf("next step order: %v", err)
+	}
+	if subOrder == nil {
+		t.Fatal("expected next suborder")
+	}
+
+	return subOrder
+}
+
+func rejectedStateMachineSubOrder(subOrder *Order) *Order {
+	result := *subOrder
+	result.Status = OrderStatusRejected
+	result.RejectReason = RejectReasonNotEnoughLiquidity
+
+	return &result
+}
+
+func canceledStateMachineSubOrder(subOrder *Order) *Order {
+	result := *subOrder
+	result.Status = OrderStatusCanceled
+
+	return &result
+}
+
+func completedStateMachineSubOrder(subOrder *Order, executedAmount decimal.Decimal, executedTotal decimal.Decimal) *Order {
+	result := *subOrder
+	result.Status = OrderStatusCompleted
+	result.ExecutedAmount = executedAmount
+	result.ExecutedTotal = executedTotal
+
+	return &result
+}
+
+func assertReroutedFirstStep(t *testing.T, activeSwap *Swap) {
+	t.Helper()
+
+	if activeSwap.Status != SwapStatusNew {
+		t.Fatalf("status mismatch: got %s, want %s", activeSwap.Status, SwapStatusNew)
+	}
+	if activeSwap.CurrentPath != 1 {
+		t.Fatalf("current path mismatch: got %d, want 1", activeSwap.CurrentPath)
+	}
+	if activeSwap.CurrentStep != 0 {
+		t.Fatalf("current step mismatch: got %d, want 0", activeSwap.CurrentStep)
+	}
+	if gotPairs, wantPairs := activeSwap.StepPairs(), []string{"BTC-ETH", "ETH-USDT"}; !reflect.DeepEqual(gotPairs, wantPairs) {
+		t.Fatalf("step pairs mismatch: got %v, want %v", gotPairs, wantPairs)
+	}
+	if len(activeSwap.RejectedSteps) != 1 {
+		t.Fatalf("rejected steps count mismatch: got %d, want 1", len(activeSwap.RejectedSteps))
+	}
+	if activeSwap.RejectedSteps[0].Status != StepStatusRejected {
+		t.Fatalf("rejected step status mismatch: got %s, want %s", activeSwap.RejectedSteps[0].Status, StepStatusRejected)
+	}
+	for _, step := range activeSwap.Steps {
+		if step.Status != StepStatusNew {
+			t.Fatalf("rerouted step status mismatch: got %s, want %s", step.Status, StepStatusNew)
+		}
+	}
+}
+
+func assertNotEnoughLiquidityRejectedSwap(t *testing.T, activeSwap *Swap) {
+	t.Helper()
+
+	assertRejectedSwap(t, activeSwap, RejectReasonNotEnoughLiquidity)
+}
+
+func assertInvalidFallbackRejectedSwap(t *testing.T, activeSwap *Swap) {
+	t.Helper()
+
+	assertRejectedSwap(t, activeSwap, RejectReasonUnspecified)
+	if activeSwap.CurrentPath != 1 {
+		t.Fatalf("current path mismatch: got %d, want 1", activeSwap.CurrentPath)
+	}
+}
+
+func assertNonFirstStepRejectedSwap(t *testing.T, activeSwap *Swap) {
+	t.Helper()
+
+	assertRejectedSwap(t, activeSwap, RejectReasonNotEnoughLiquidity)
+	if activeSwap.CurrentStep != 1 {
+		t.Fatalf("current step mismatch: got %d, want 1", activeSwap.CurrentStep)
+	}
+}
+
+func assertCanceledSwap(t *testing.T, activeSwap *Swap) {
+	t.Helper()
+
+	if activeSwap.Status != SwapStatusCanceled {
+		t.Fatalf("status mismatch: got %s, want %s", activeSwap.Status, SwapStatusCanceled)
+	}
+	if activeSwap.Order.Status != OrderStatusCanceled {
+		t.Fatalf("order status mismatch: got %s, want %s", activeSwap.Order.Status, OrderStatusCanceled)
+	}
+}
+
+func assertNoMatchesRejectedSwap(t *testing.T, activeSwap *Swap) {
+	t.Helper()
+
+	assertRejectedSwap(t, activeSwap, RejectReasonNoMatches)
+}
+
+func assertRejectedSwap(t *testing.T, activeSwap *Swap, reason RejectReason) {
+	t.Helper()
+
+	if activeSwap.Status != SwapStatusRejected {
+		t.Fatalf("status mismatch: got %s, want %s", activeSwap.Status, SwapStatusRejected)
+	}
+	if activeSwap.Order.Status != OrderStatusRejected {
+		t.Fatalf("order status mismatch: got %s, want %s", activeSwap.Order.Status, OrderStatusRejected)
+	}
+	if activeSwap.RejectReason != reason {
+		t.Fatalf("swap reject reason mismatch: got %s, want %s", activeSwap.RejectReason, reason)
+	}
+	if activeSwap.Order.RejectReason != reason {
+		t.Fatalf("order reject reason mismatch: got %s, want %s", activeSwap.Order.RejectReason, reason)
+	}
 }

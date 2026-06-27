@@ -1,3 +1,5 @@
+[![CI](https://github.com/orchidknight/swapper/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/orchidknight/swapper/actions/workflows/ci.yml)
+
 # swapper
 
 `swapper` is a small Go library for building a chain of market suborders from a single swap order.
