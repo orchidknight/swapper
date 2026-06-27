@@ -20,7 +20,7 @@ type SwapType string
 const (
 	// StepStatusNew means the step has not started execution.
 	StepStatusNew = "new"
-	// StepStatusInProgress means the step has a partially executed suborder.
+	// StepStatusInProgress means the step has an outstanding or partially executed suborder.
 	StepStatusInProgress = "inProgress"
 	// StepStatusCompleted means the step has completed.
 	StepStatusCompleted = "completed"
@@ -119,11 +119,19 @@ func (s *Step) Update(o *Order) {
 	switch s.Side {
 	case SideBuy:
 		s.ReceivedAmount = o.ExecutedAmount
-		s.SpentAmount = o.ExecutedAmount.Mul(o.AvgPrice)
+		s.SpentAmount = executedTotal(o)
 	case SideSell:
-		s.ReceivedAmount = o.ExecutedAmount.Mul(o.AvgPrice)
+		s.ReceivedAmount = executedTotal(o)
 		s.SpentAmount = o.ExecutedAmount
 	}
+}
+
+func executedTotal(o *Order) decimal.Decimal {
+	if !o.ExecutedTotal.IsZero() {
+		return o.ExecutedTotal
+	}
+
+	return o.ExecutedAmount.Mul(o.AvgPrice)
 }
 
 // Update applies a suborder result to the swap and reports whether it was accepted.
@@ -143,68 +151,28 @@ func (s *Swap) Update(o *Order) bool {
 
 	s.Steps[stepIndex].Update(o)
 	s.CurrentStep = stepIndex
+	currentStep := s.Steps[stepIndex]
 
 	if s.Type == SwapTypeBuyThenSell {
 		// not supported, see spec §10
-		s.Status = SwapStatusRejected
-		s.Order.Reject(RejectReasonBuySwapsNotSupported)
-		s.RejectReason = RejectReasonBuySwapsNotSupported
+		s.rejectSwap(RejectReasonBuySwapsNotSupported)
 
 		return true
 	}
 
-	lastStep := s.Steps[len(s.Steps)-1]
-	firstStep := s.Steps[0]
+	switch currentStep.Status {
+	case StepStatusCanceled:
+		s.cancelSwap()
 
-	if lastStep.Status == StepStatusCompleted {
-		s.Status = SwapStatusCompleted
-		s.Order.Status = OrderStatusCompleted
-
-		// Для sell-свапа amount — потраченный входящий актив, total — полученный конечный актив.
-		// Buy-свапы не поддержаны, см. spec §10.
-		switch s.Order.Side {
-		case SideSell:
-			s.Order.ExecutedAmount = firstStep.SpentAmount
-			s.Order.ExecutedTotal = lastStep.ReceivedAmount
-			s.Order.AvailableAmount = s.Order.AvailableAmount.Sub(s.Order.ExecutedAmount)
-			s.Order.AvgPrice = s.Order.ExecutedTotal.Div(s.Order.ExecutedAmount)
-			s.Order.Price = s.Order.AvgPrice
-		case SideBuy:
-			// not supported, see spec §10
-			s.Status = SwapStatusRejected
-			s.Order.Reject(RejectReasonBuySwapsNotSupported)
-			s.RejectReason = RejectReasonBuySwapsNotSupported
-
-			return true
-		}
+		return true
+	case StepStatusRejected:
+		s.handleRejectedStep(o, stepIndex)
 
 		return true
 	}
 
-	if o.Status == OrderStatusRejected && s.CurrentStep == 0 && s.CurrentPath != len(s.Paths)-1 {
-		s.RejectedSteps = append(s.RejectedSteps, s.Steps[stepIndex])
-
-		s.CurrentPath++
-		newPathIndex := s.CurrentPath
-
-		if newPathIndex >= len(s.Paths) {
-			s.Status = SwapStatusRejected
-			s.Order.Status = OrderStatusRejected
-			s.RejectReason = o.RejectReason
-
-			return true
-		}
-
-		s.Steps = swapSteps(s.Order.Symbol.String(), s.Paths[newPathIndex].Pairs, s.Type)
-		s.CurrentStep = 0
-		s.Status = SwapStatusNew
-
-		return true
-	}
-
-	if o.Status == OrderStatusRejected {
-		s.Status = SwapStatusRejected
-		s.Order.Status = OrderStatusRejected
+	if s.Steps[len(s.Steps)-1].Status == StepStatusCompleted {
+		s.completeSwap()
 
 		return true
 	}
@@ -212,6 +180,83 @@ func (s *Swap) Update(o *Order) bool {
 	s.Status = SwapStatusInProgress
 
 	return true
+}
+
+func (s *Swap) cancelSwap() {
+	s.Status = SwapStatusCanceled
+	s.Order.Status = OrderStatusCanceled
+}
+
+func (s *Swap) completeSwap() {
+	firstStep := s.Steps[0]
+	lastStep := s.Steps[len(s.Steps)-1]
+
+	s.Status = SwapStatusCompleted
+	s.Order.Status = OrderStatusCompleted
+
+	// Для sell-свапа amount — потраченный входящий актив, total — полученный конечный актив.
+	// Buy-свапы не поддержаны, см. spec §10.
+	switch s.Order.Side {
+	case SideSell:
+		s.completeSellSwap(firstStep, lastStep)
+	case SideBuy:
+		s.rejectSwap(RejectReasonBuySwapsNotSupported)
+	}
+}
+
+func (s *Swap) completeSellSwap(firstStep, lastStep *Step) {
+	if firstStep.SpentAmount.IsZero() {
+		// Completed with zero executed volume: AvgPrice would divide by zero.
+		s.rejectSwap(RejectReasonNoMatches)
+
+		return
+	}
+
+	s.Order.ExecutedAmount = firstStep.SpentAmount
+	s.Order.ExecutedTotal = lastStep.ReceivedAmount
+	s.Order.AvailableAmount = s.Order.AvailableAmount.Sub(s.Order.ExecutedAmount)
+	s.Order.AvgPrice = s.Order.ExecutedTotal.Div(s.Order.ExecutedAmount)
+	s.Order.Price = s.Order.AvgPrice
+}
+
+func (s *Swap) handleRejectedStep(o *Order, stepIndex int) {
+	if s.CurrentStep == 0 && s.CurrentPath < len(s.Paths)-1 {
+		s.rerouteFirstStep(stepIndex)
+
+		return
+	}
+
+	s.rejectSwap(rejectReasonOrUnspecified(o.RejectReason))
+}
+
+func (s *Swap) rerouteFirstStep(stepIndex int) {
+	s.RejectedSteps = append(s.RejectedSteps, s.Steps[stepIndex])
+	s.CurrentPath++
+
+	steps := swapSteps(s.Order.Symbol.String(), s.Paths[s.CurrentPath].Pairs, s.Type)
+	if len(steps) == 0 {
+		s.rejectSwap(RejectReasonUnspecified)
+
+		return
+	}
+
+	s.Steps = steps
+	s.CurrentStep = 0
+	s.Status = SwapStatusNew
+}
+
+func (s *Swap) rejectSwap(reason RejectReason) {
+	s.Status = SwapStatusRejected
+	s.Order.Reject(reason)
+	s.RejectReason = reason
+}
+
+func rejectReasonOrUnspecified(reason RejectReason) RejectReason {
+	if reason == "" {
+		return RejectReasonUnspecified
+	}
+
+	return reason
 }
 
 // NextStepOrder creates the next executable market suborder for the swap.
@@ -227,28 +272,34 @@ func (s *Swap) NextStepOrder() (*Order, error) {
 		suborderID := NewID()
 
 		if i == 0 {
-			amount := step.truncateBase(s.Order.Amount)
-			availableAmount := step.truncateBase(s.Order.AvailableAmount)
 			order := &Order{
-				ID:              suborderID,
-				Account:         s.Order.Account,
-				Symbol:          step.Symbol,
-				Type:            OrderTypeMarket,
-				Side:            step.Side,
-				Status:          OrderStatusNew,
-				Amount:          amount,
-				AvailableAmount: availableAmount,
-				CreatedAt:       time.Now().UTC(),
+				ID:        suborderID,
+				Account:   s.Order.Account,
+				Symbol:    step.Symbol,
+				Type:      OrderTypeMarket,
+				Side:      step.Side,
+				Status:    OrderStatusNew,
+				CreatedAt: time.Now().UTC(),
+			}
+			switch step.Side {
+			case SideSell:
+				amount := step.truncateBase(s.Order.Amount)
+				availableAmount := step.truncateBase(s.Order.AvailableAmount)
+				order.Amount = amount
+				order.AvailableAmount = availableAmount
+			case SideBuy:
+				order.AvailableTotal = step.truncateQuote(s.Order.AvailableAmount)
 			}
 
 			s.SubOrders[order.ID] = i
 			s.Steps[i].Order = order
+			s.Steps[i].Status = StepStatusInProgress
 
 			return order, nil
 		}
 
 		prevStep := s.Steps[i-1]
-		orderSide := prevStep.Side.Opposite()
+		orderSide := step.Side
 
 		order := &Order{
 			ID:        suborderID,
@@ -269,6 +320,7 @@ func (s *Swap) NextStepOrder() (*Order, error) {
 
 		s.SubOrders[order.ID] = i
 		s.Steps[i].Order = order
+		s.Steps[i].Status = StepStatusInProgress
 		s.CurrentStep = i
 
 		return order, nil
@@ -284,6 +336,9 @@ func (s *Step) truncateBase(value decimal.Decimal) decimal.Decimal {
 func (s *Step) truncateQuote(value decimal.Decimal) decimal.Decimal {
 	return truncatePrecision(value, s.QuotePrecision)
 }
+
+// PrecisionUnknown marks a precision as unset so amounts pass through without truncation.
+const PrecisionUnknown int32 = -1
 
 func truncatePrecision(value decimal.Decimal, precision int32) decimal.Decimal {
 	if precision < 0 {
@@ -325,15 +380,27 @@ type PairStep struct {
 }
 
 // NewSwap creates a swap state machine for an order and candidate paths.
+//
+// allSteps must contain at least one path with a non-empty Pairs slice; the
+// first path is selected as the active one. NewSwap returns nil when no usable
+// path is provided.
 func NewSwap(o *Order, allSteps []*LinkedPairs) *Swap {
+	if o == nil || len(allSteps) == 0 || allSteps[0] == nil || len(allSteps[0].Pairs) == 0 {
+		return nil
+	}
+
 	swapType := swapType(o)
+	steps := swapSteps(o.Symbol.String(), allSteps[0].Pairs, swapType)
+	if len(steps) == 0 {
+		return nil
+	}
 
 	s := &Swap{
 		ID:            o.ID,
 		Status:        SwapStatusNew,
 		Type:          swapType,
 		Order:         o,
-		Steps:         swapSteps(o.Symbol.String(), allSteps[0].Pairs, swapType),
+		Steps:         steps,
 		SubOrders:     make(map[uint64]int),
 		CurrentStep:   0,
 		RejectedSteps: make([]*Step, 0),
@@ -357,68 +424,43 @@ func swapType(o *Order) SwapType {
 }
 
 func swapSteps(initialSymbol string, s []Pair, swapType SwapType) []*Step {
-	if swapType == SwapTypeBuyThenSell {
+	if swapType != SwapTypeSellThenBuy {
 		// not supported, see spec §10
 		return nil
 	}
 
-	if len(s) == 1 {
-		if initialSymbol == s[0].Symbol.String() {
-			pair := s[0]
-			symbol := pair.Symbol
-			step := &Step{
-				ID:             0,
-				Status:         StepStatusNew,
-				Side:           SideSell,
-				Type:           SwapTypeSellThenBuy,
-				Symbol:         symbol,
-				ReceivedAsset:  symbol.QuoteAsset(),
-				SpentAsset:     symbol.BaseAsset(),
-				BasePrecision:  pair.BasePrecision,
-				QuotePrecision: pair.QuotePrecision,
-			}
-
-			return []*Step{step}
-		}
-
-		pair := s[0]
-		symbol := pair.Symbol
-		step := &Step{
-			ID:             0,
-			Status:         StepStatusNew,
-			Side:           SideBuy,
-			Type:           SwapTypeSellThenBuy,
-			Symbol:         symbol,
-			ReceivedAsset:  symbol.BaseAsset(),
-			SpentAsset:     symbol.QuoteAsset(),
-			BasePrecision:  pair.BasePrecision,
-			QuotePrecision: pair.QuotePrecision,
-		}
-
-		return []*Step{step}
+	swapSymbol := Symbol(initialSymbol)
+	currentAsset := swapSymbol.BaseAsset()
+	targetAsset := swapSymbol.QuoteAsset()
+	if currentAsset == "" || targetAsset == "" || currentAsset == targetAsset {
+		return nil
 	}
 
 	steps := make([]*Step, 0, len(s))
 
-	var nextSide Side
-	var receivedAsset, spentAsset string
-
-	switch swapType {
-	case SwapTypeSellThenBuy:
-		nextSide = SideSell
-	default:
-		return nil
-	}
-
 	for i, step := range s {
 		symbol := step.Symbol
-		if nextSide == SideBuy {
+		baseAsset := symbol.BaseAsset()
+		quoteAsset := symbol.QuoteAsset()
+		if baseAsset == "" || quoteAsset == "" {
+			return nil
+		}
+
+		var nextSide Side
+		var receivedAsset, spentAsset string
+		switch currentAsset {
+		case baseAsset:
+			nextSide = SideSell
+			receivedAsset = quoteAsset
+			spentAsset = baseAsset
+		case quoteAsset:
+			nextSide = SideBuy
 			receivedAsset = symbol.BaseAsset()
 			spentAsset = symbol.QuoteAsset()
-		} else {
-			receivedAsset = symbol.QuoteAsset()
-			spentAsset = symbol.BaseAsset()
+		default:
+			return nil
 		}
+
 		steps = append(steps, &Step{
 			ID:             i,
 			Status:         StepStatusNew,
@@ -432,7 +474,11 @@ func swapSteps(initialSymbol string, s []Pair, swapType SwapType) []*Step {
 			QuotePrecision: step.QuotePrecision,
 		})
 
-		nextSide = nextSide.Opposite()
+		currentAsset = receivedAsset
+	}
+
+	if currentAsset != targetAsset {
+		return nil
 	}
 
 	return steps

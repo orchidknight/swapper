@@ -2,6 +2,7 @@ package swap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -212,6 +213,94 @@ func TestSwapper_ConsumeOrderAppliesMarketPrecisionToFirstSubOrder(t *testing.T)
 	}
 	if firstStep.QuotePrecision != 2 {
 		t.Fatalf("step quote precision mismatch: got %d, want 2", firstStep.QuotePrecision)
+	}
+}
+
+func TestSwapper_ConsumeOrderReleasesLockWhenNextStepFails(t *testing.T) {
+	wantErr := errors.New("next step boom")
+
+	s := NewSwapper(&markets.MarketService{Markets: inputOnePhaseMarkets}, &MockedStorage{}, NewLogMock())
+	s.nextStepOrder = func(*models.Swap) (*models.Order, error) {
+		return nil, wantErr
+	}
+
+	_, err := s.ConsumeOrder(context.Background(), &models.Order{
+		ID:              1,
+		Status:          models.OrderStatusNew,
+		Type:            models.OrderTypeSwap,
+		Symbol:          "BTC-USDT",
+		Side:            models.SideSell,
+		Amount:          decimal.NewFromInt(1),
+		AvailableAmount: decimal.NewFromInt(1),
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected error %v, got %v", wantErr, err)
+	}
+
+	if !s.lock.TryLock() {
+		t.Fatal("lock was not released after NextStepOrder error")
+	}
+	s.lock.Unlock()
+}
+
+func TestSwapper_ConsumeOrderValidatesInput(t *testing.T) {
+	s := NewSwapper(&markets.MarketService{Markets: inputOnePhaseMarkets}, &MockedStorage{}, NewLogMock())
+
+	report, err := s.ConsumeOrder(context.Background(), nil)
+	assertError(t, err, "order is nil")
+	if report != nil {
+		t.Fatalf("report mismatch: got %v, want nil", report)
+	}
+}
+
+func TestSwapper_ConsumeOrderRejectsInvalidSwapOrder(t *testing.T) {
+	tests := map[string]struct {
+		order      *models.Order
+		wantErr    string
+		wantStatus models.OrderStatus
+	}{
+		"non swap order": {
+			order: &models.Order{
+				ID:              1,
+				Type:            models.OrderTypeMarket,
+				Status:          models.OrderStatusNew,
+				Symbol:          "BTC-USDT",
+				Side:            models.SideSell,
+				Amount:          decimal.NewFromInt(1),
+				AvailableAmount: decimal.NewFromInt(1),
+			},
+			wantErr:    "order type must be Swap",
+			wantStatus: models.OrderStatusRejected,
+		},
+		"unspecified side": {
+			order: &models.Order{
+				ID:              2,
+				Type:            models.OrderTypeSwap,
+				Status:          models.OrderStatusNew,
+				Symbol:          "BTC-USDT",
+				Side:            models.SideUnspecified,
+				Amount:          decimal.NewFromInt(1),
+				AvailableAmount: decimal.NewFromInt(1),
+			},
+			wantErr:    "swap side must be sell",
+			wantStatus: models.OrderStatusRejected,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			s := NewSwapper(&markets.MarketService{Markets: inputOnePhaseMarkets}, &MockedStorage{}, NewLogMock())
+
+			report, err := s.ConsumeOrder(context.Background(), tc.order)
+			assertError(t, err, tc.wantErr)
+
+			if report == nil || report.ResultSwapOrder == nil {
+				t.Fatalf("expected rejected order report, got %v", report)
+			}
+			if report.ResultSwapOrder.Status != tc.wantStatus {
+				t.Fatalf("status mismatch: got %s, want %s", report.ResultSwapOrder.Status, tc.wantStatus)
+			}
+		})
 	}
 }
 

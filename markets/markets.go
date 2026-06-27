@@ -51,7 +51,7 @@ func (ms *MarketService) GetMarket(s models.Symbol) *models.MarketPair {
 func (ms *MarketService) GetAllSwapPairs(symbol models.Symbol) ([]*models.LinkedPairs, error) {
 	exceptions := make(map[string]struct{})
 	parts := strings.Split(symbol.String(), separator)
-	if len(parts) < 2 {
+	if len(parts) != 2 {
 		return nil, ErrInvalidSwapPair
 	}
 
@@ -117,11 +117,13 @@ func (ms *MarketService) findAllLinks(src, dst string, exceptions map[string]str
 		results = append(results, &models.LinkedPairs{
 			Pairs: []models.Pair{{Symbol: linkedAsset.market.Symbol}},
 		})
-
-		return results
 	}
 
 	for _, linkedAsset := range linkedAssets {
+		if linkedAsset.asset == src {
+			continue
+		}
+
 		branchExceptions := copyExceptions(exceptions)
 		branchExceptions[linkedAsset.market.Symbol.String()] = struct{}{}
 

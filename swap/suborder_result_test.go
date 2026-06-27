@@ -322,13 +322,6 @@ func runConsumeSubOrderResultCase(
 
 func TestSwapper_ConsumeSubOrderResultUnlocksAfterNextStepOrderError(t *testing.T) {
 	nextStepErr := errors.New("next step order failed")
-	originalNextStepOrder := nextStepOrder
-	nextStepOrder = func(*models.Swap) (*models.Order, error) {
-		return nil, nextStepErr
-	}
-	t.Cleanup(func() {
-		nextStepOrder = originalNextStepOrder
-	})
 
 	inProgressSwap, inProgressOrder := newNextStepOrderErrorInProgressCase(t)
 	newSwap, newOrder := newNextStepOrderErrorNewCase(t)
@@ -344,6 +337,9 @@ func TestSwapper_ConsumeSubOrderResultUnlocksAfterNextStepOrderError(t *testing.
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			s := NewSwapper(nil, &MockedStorage{}, NewLogMock())
+			s.nextStepOrder = func(*models.Swap) (*models.Order, error) {
+				return nil, nextStepErr
+			}
 			s.activeSwaps[tc.swap.ID] = tc.swap
 			s.orders[tc.order.ID] = tc.swap.ID
 
@@ -364,6 +360,135 @@ func TestSwapper_ConsumeSubOrderResultUnlocksAfterNextStepOrderError(t *testing.
 				t.Fatal("ConsumeSubOrderResult blocked after NextStepOrder error")
 			}
 		})
+	}
+}
+
+func TestSwapper_ConsumeSubOrderResultValidatesInput(t *testing.T) {
+	s := NewSwapper(&markets.MarketService{Markets: inputOnePhaseMarkets}, &MockedStorage{}, NewLogMock())
+
+	report, err := s.ConsumeSubOrderResult(context.Background(), nil)
+	assertError(t, err, "order is nil")
+	if report != nil {
+		t.Fatalf("report mismatch: got %v, want nil", report)
+	}
+}
+
+func TestSwapper_LoadOrdersRestoresOutstandingSubOrder(t *testing.T) {
+	ctx := context.Background()
+	storage := newMemoryStorage()
+	marketService := &markets.MarketService{Markets: inputOnePhaseMarkets}
+	initialSwapper := NewSwapper(marketService, storage, NewLogMock())
+
+	report, err := initialSwapper.ConsumeOrder(ctx, &models.Order{
+		ID:              10,
+		Type:            models.OrderTypeSwap,
+		Status:          models.OrderStatusNew,
+		Symbol:          "BTC-USDT",
+		Side:            models.SideSell,
+		Amount:          decimal.NewFromInt(1),
+		AvailableAmount: decimal.NewFromInt(1),
+	})
+	if err != nil {
+		t.Fatalf("consume order: %v", err)
+	}
+
+	restoredSwapper := NewSwapper(marketService, storage, NewLogMock())
+	if loadErr := restoredSwapper.LoadOrders(ctx); loadErr != nil {
+		t.Fatalf("load orders: %v", loadErr)
+	}
+
+	result, err := restoredSwapper.ConsumeSubOrderResult(ctx, &models.Order{
+		ID:             report.SubOrderToSend.ID,
+		Type:           models.OrderTypeMarket,
+		Status:         models.OrderStatusCompleted,
+		Symbol:         "BTC-USDT",
+		Side:           models.SideSell,
+		ExecutedAmount: decimal.NewFromInt(1),
+		ExecutedTotal:  decimal.NewFromInt(100),
+		AvgPrice:       decimal.NewFromInt(100),
+	})
+	if err != nil {
+		t.Fatalf("consume suborder result: %v", err)
+	}
+	if result == nil || result.ResultSwapOrder == nil {
+		t.Fatalf("expected completed swap report, got %v", result)
+	}
+	if result.ResultSwapOrder.Status != models.OrderStatusCompleted {
+		t.Fatalf("swap order status mismatch: got %s, want %s", result.ResultSwapOrder.Status, models.OrderStatusCompleted)
+	}
+}
+
+func TestSwapper_ConsumeSubOrderResultRemovesFinishedSwapFromMemory(t *testing.T) {
+	ctx := context.Background()
+	s := NewSwapper(&markets.MarketService{Markets: inputOnePhaseMarkets}, &MockedStorage{}, NewLogMock())
+
+	report, err := s.ConsumeOrder(ctx, &models.Order{
+		ID:              11,
+		Type:            models.OrderTypeSwap,
+		Status:          models.OrderStatusNew,
+		Symbol:          "BTC-USDT",
+		Side:            models.SideSell,
+		Amount:          decimal.NewFromInt(1),
+		AvailableAmount: decimal.NewFromInt(1),
+	})
+	if err != nil {
+		t.Fatalf("consume order: %v", err)
+	}
+
+	_, err = s.ConsumeSubOrderResult(ctx, &models.Order{
+		ID:             report.SubOrderToSend.ID,
+		Type:           models.OrderTypeMarket,
+		Status:         models.OrderStatusCompleted,
+		Symbol:         "BTC-USDT",
+		Side:           models.SideSell,
+		ExecutedAmount: decimal.NewFromInt(1),
+		ExecutedTotal:  decimal.NewFromInt(100),
+		AvgPrice:       decimal.NewFromInt(100),
+	})
+	if err != nil {
+		t.Fatalf("consume suborder result: %v", err)
+	}
+
+	if got := len(s.activeSwaps); got != 0 {
+		t.Fatalf("active swaps count mismatch: got %d, want 0", got)
+	}
+}
+
+func TestSwapper_ConsumeSubOrderResultCancelsSwap(t *testing.T) {
+	ctx := context.Background()
+	s := NewSwapper(&markets.MarketService{Markets: inputOnePhaseMarkets}, &MockedStorage{}, NewLogMock())
+
+	report, err := s.ConsumeOrder(ctx, &models.Order{
+		ID:              12,
+		Type:            models.OrderTypeSwap,
+		Status:          models.OrderStatusNew,
+		Symbol:          "BTC-USDT",
+		Side:            models.SideSell,
+		Amount:          decimal.NewFromInt(1),
+		AvailableAmount: decimal.NewFromInt(1),
+	})
+	if err != nil {
+		t.Fatalf("consume order: %v", err)
+	}
+
+	result, err := s.ConsumeSubOrderResult(ctx, &models.Order{
+		ID:     report.SubOrderToSend.ID,
+		Type:   models.OrderTypeMarket,
+		Status: models.OrderStatusCanceled,
+		Symbol: "BTC-USDT",
+		Side:   models.SideSell,
+	})
+	if err != nil {
+		t.Fatalf("consume suborder result: %v", err)
+	}
+	if result == nil || result.ResultSwapOrder == nil {
+		t.Fatalf("expected canceled swap report, got %v", result)
+	}
+	if result.ResultSwapOrder.Status != models.OrderStatusCanceled {
+		t.Fatalf("swap order status mismatch: got %s, want %s", result.ResultSwapOrder.Status, models.OrderStatusCanceled)
+	}
+	if got := len(s.activeSwaps); got != 0 {
+		t.Fatalf("active swaps count mismatch: got %d, want 0", got)
 	}
 }
 
@@ -441,5 +566,40 @@ func (*MockedStorage) DeleteSwap(_ context.Context, _ uint64) error {
 	return nil
 }
 func (*MockedStorage) UpdateSwap(_ context.Context, _ *models.Swap) error {
+	return nil
+}
+
+type memoryStorage struct {
+	swaps map[uint64]*models.Swap
+}
+
+func newMemoryStorage() *memoryStorage {
+	return &memoryStorage{swaps: make(map[uint64]*models.Swap)}
+}
+
+func (s *memoryStorage) SaveSwap(_ context.Context, swap *models.Swap) error {
+	s.swaps[swap.ID] = swap
+
+	return nil
+}
+
+func (s *memoryStorage) GetAllSwaps(_ context.Context) ([]*models.Swap, error) {
+	swaps := make([]*models.Swap, 0, len(s.swaps))
+	for _, swap := range s.swaps {
+		swaps = append(swaps, swap)
+	}
+
+	return swaps, nil
+}
+
+func (s *memoryStorage) DeleteSwap(_ context.Context, id uint64) error {
+	delete(s.swaps, id)
+
+	return nil
+}
+
+func (s *memoryStorage) UpdateSwap(_ context.Context, swap *models.Swap) error {
+	s.swaps[swap.ID] = swap
+
 	return nil
 }

@@ -112,6 +112,54 @@ func TestNewSwap(t *testing.T) {
 				},
 			},
 		},
+		"three step swap from spec": {
+			inputOrder: &Order{
+				ID:     4,
+				Type:   OrderTypeSwap,
+				Symbol: "DOGE-SHIB",
+				Side:   SideSell,
+			},
+			inputSteps: []*LinkedPairs{{Pairs: []Pair{{Symbol: "DOGE-USDT"}, {Symbol: "BNB-USDT"}, {Symbol: "SHIB-BNB"}}}},
+			wantSwap: &Swap{
+				ID:     4,
+				Type:   SwapTypeSellThenBuy,
+				Status: SwapStatusNew,
+				Order: &Order{
+					ID:     4,
+					Type:   OrderTypeSwap,
+					Symbol: "DOGE-SHIB",
+				},
+				Steps: []*Step{
+					{
+						ID:            0,
+						Status:        StepStatusNew,
+						Side:          SideSell,
+						Type:          SwapTypeSellThenBuy,
+						Symbol:        "DOGE-USDT",
+						ReceivedAsset: "USDT",
+						SpentAsset:    "DOGE",
+					},
+					{
+						ID:            1,
+						Status:        StepStatusNew,
+						Side:          SideBuy,
+						Type:          SwapTypeSellThenBuy,
+						Symbol:        "BNB-USDT",
+						ReceivedAsset: "BNB",
+						SpentAsset:    "USDT",
+					},
+					{
+						ID:            2,
+						Status:        StepStatusNew,
+						Side:          SideBuy,
+						Type:          SwapTypeSellThenBuy,
+						Symbol:        "SHIB-BNB",
+						ReceivedAsset: "SHIB",
+						SpentAsset:    "BNB",
+					},
+				},
+			},
+		},
 		"five step swap": {
 			inputOrder: &Order{
 				ID:     3,
@@ -187,6 +235,186 @@ func TestNewSwap(t *testing.T) {
 				t.Fatalf("swaps dont match:\n actual:%s\nwant:%s\n", gotSwap, tc.wantSwap)
 			}
 		})
+	}
+}
+
+func TestNewSwapReturnsNilForEmptyPaths(t *testing.T) {
+	order := &Order{ID: 1, Type: OrderTypeSwap, Symbol: "BTC-USDT", Side: SideSell}
+
+	tests := map[string][]*LinkedPairs{
+		"nil paths":        nil,
+		"empty paths":      {},
+		"nil first path":   {nil},
+		"empty first path": {{Pairs: nil}},
+	}
+
+	for name, paths := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := NewSwap(order, paths); got != nil {
+				t.Fatalf("expected nil swap, got %v", got)
+			}
+		})
+	}
+}
+
+func TestNewSwapReturnsNilForNilOrder(t *testing.T) {
+	if got := NewSwap(nil, []*LinkedPairs{{Pairs: []Pair{{Symbol: "BTC-USDT"}}}}); got != nil {
+		t.Fatalf("expected nil swap, got %v", got)
+	}
+}
+
+func TestNextStepOrderUsesQuoteTotalForReversedFirstStep(t *testing.T) {
+	swapOrder := &Order{
+		ID:              1,
+		Type:            OrderTypeSwap,
+		Symbol:          "USDT-XLM",
+		Side:            SideSell,
+		Amount:          decimal.NewFromInt(100),
+		AvailableAmount: decimal.NewFromInt(100),
+	}
+	swap := NewSwap(swapOrder, []*LinkedPairs{{Pairs: []Pair{{Symbol: "XLM-USDT"}}}})
+
+	subOrder, err := swap.NextStepOrder()
+	if err != nil {
+		t.Fatalf("next step order: %v", err)
+	}
+
+	if subOrder.Side != SideBuy {
+		t.Fatalf("suborder side mismatch: got %s, want %s", subOrder.Side, SideBuy)
+	}
+	if !subOrder.Amount.IsZero() {
+		t.Fatalf("suborder amount mismatch: got %s, want 0", subOrder.Amount)
+	}
+	if !subOrder.AvailableTotal.Equal(decimal.NewFromInt(100)) {
+		t.Fatalf("suborder available total mismatch: got %s, want 100", subOrder.AvailableTotal)
+	}
+}
+
+func TestNextStepOrderUsesDerivedSideForThreeHopPath(t *testing.T) {
+	swapOrder := &Order{
+		ID:              1,
+		Type:            OrderTypeSwap,
+		Symbol:          "DOGE-SHIB",
+		Side:            SideSell,
+		Amount:          decimal.NewFromInt(100),
+		AvailableAmount: decimal.NewFromInt(100),
+	}
+	swap := NewSwap(swapOrder, []*LinkedPairs{{
+		Pairs: []Pair{{Symbol: "DOGE-USDT"}, {Symbol: "BNB-USDT"}, {Symbol: "SHIB-BNB"}},
+	}})
+
+	firstSubOrder, err := swap.NextStepOrder()
+	if err != nil {
+		t.Fatalf("first next step order: %v", err)
+	}
+	completedFirst := *firstSubOrder
+	completedFirst.Status = OrderStatusCompleted
+	completedFirst.ExecutedAmount = decimal.NewFromInt(100)
+	completedFirst.ExecutedTotal = decimal.NewFromInt(200)
+	swap.Update(&completedFirst)
+
+	secondSubOrder, err := swap.NextStepOrder()
+	if err != nil {
+		t.Fatalf("second next step order: %v", err)
+	}
+	completedSecond := *secondSubOrder
+	completedSecond.Status = OrderStatusCompleted
+	completedSecond.ExecutedAmount = decimal.NewFromInt(10)
+	completedSecond.ExecutedTotal = decimal.NewFromInt(200)
+	swap.Update(&completedSecond)
+
+	thirdSubOrder, err := swap.NextStepOrder()
+	if err != nil {
+		t.Fatalf("third next step order: %v", err)
+	}
+
+	if thirdSubOrder.Side != SideBuy {
+		t.Fatalf("third suborder side mismatch: got %s, want %s", thirdSubOrder.Side, SideBuy)
+	}
+	if thirdSubOrder.Symbol != "SHIB-BNB" {
+		t.Fatalf("third suborder symbol mismatch: got %s, want SHIB-BNB", thirdSubOrder.Symbol)
+	}
+	if !thirdSubOrder.AvailableTotal.Equal(decimal.NewFromInt(10)) {
+		t.Fatalf("third suborder available total mismatch: got %s, want 10", thirdSubOrder.AvailableTotal)
+	}
+}
+
+func TestStepUpdateUsesExecutedTotalWhenProvided(t *testing.T) {
+	tests := map[string]struct {
+		step      *Step
+		wantSpent decimal.Decimal
+		wantRecv  decimal.Decimal
+	}{
+		"sell receives executed total": {
+			step: &Step{
+				Side: SideSell,
+				Type: SwapTypeSellThenBuy,
+			},
+			wantSpent: decimal.NewFromInt(2),
+			wantRecv:  decimal.NewFromInt(5),
+		},
+		"buy spends executed total": {
+			step: &Step{
+				Side: SideBuy,
+				Type: SwapTypeSellThenBuy,
+			},
+			wantSpent: decimal.NewFromInt(5),
+			wantRecv:  decimal.NewFromInt(2),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			tc.step.Update(&Order{
+				Status:         OrderStatusCompleted,
+				ExecutedAmount: decimal.NewFromInt(2),
+				ExecutedTotal:  decimal.NewFromInt(5),
+				AvgPrice:       decimal.Zero,
+			})
+
+			if !tc.step.SpentAmount.Equal(tc.wantSpent) {
+				t.Fatalf("spent amount mismatch: got %s, want %s", tc.step.SpentAmount, tc.wantSpent)
+			}
+			if !tc.step.ReceivedAmount.Equal(tc.wantRecv) {
+				t.Fatalf("received amount mismatch: got %s, want %s", tc.step.ReceivedAmount, tc.wantRecv)
+			}
+		})
+	}
+}
+
+func TestSwapUpdateRejectsZeroExecutedAmountWithoutPanic(t *testing.T) {
+	swapOrder := &Order{
+		ID:              1,
+		Account:         "account",
+		Type:            OrderTypeSwap,
+		Symbol:          "BTC-USDT",
+		Side:            SideSell,
+		Amount:          decimal.NewFromInt(1),
+		AvailableAmount: decimal.NewFromInt(1),
+	}
+	swap := NewSwap(swapOrder, []*LinkedPairs{{Pairs: []Pair{{Symbol: "BTC-USDT"}}}})
+
+	subOrder, err := swap.NextStepOrder()
+	if err != nil {
+		t.Fatalf("next step order: %v", err)
+	}
+
+	// Exchange reports Completed but with zero executed volume (zero matches).
+	// AvgPrice = total / amount would divide by zero and panic.
+	completed := *subOrder
+	completed.Status = OrderStatusCompleted
+	completed.ExecutedAmount = decimal.Zero
+	completed.AvgPrice = decimal.Zero
+
+	if !swap.Update(&completed) {
+		t.Fatal("expected Update to accept the suborder result")
+	}
+
+	if swap.Status != SwapStatusRejected {
+		t.Fatalf("status mismatch: got %s, want %s", swap.Status, SwapStatusRejected)
+	}
+	if swap.Order.RejectReason != RejectReasonNoMatches {
+		t.Fatalf("reject reason mismatch: got %s, want %s", swap.Order.RejectReason, RejectReasonNoMatches)
 	}
 }
 

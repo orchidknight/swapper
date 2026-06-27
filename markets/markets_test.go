@@ -1,6 +1,7 @@
 package markets
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -78,6 +79,12 @@ func TestMarketService_GetSwapPairs(t *testing.T) {
 			wantPairs:    nil,
 			wantErr:      ErrInvalidSwapPair,
 		},
+		"invalid symbol with too many parts": {
+			inputSymbol:  "PEPE-USDT-SOL",
+			inputMarkets: inputManyMarkets,
+			wantPairs:    nil,
+			wantErr:      ErrInvalidSwapPair,
+		},
 	}
 
 	for name, tc := range tests {
@@ -86,7 +93,11 @@ func TestMarketService_GetSwapPairs(t *testing.T) {
 		}
 
 		t.Run(name, func(t *testing.T) {
-			got, _ := ms.GetAllSwapPairs(tc.inputSymbol)
+			got, err := ms.GetAllSwapPairs(tc.inputSymbol)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error mismatch: got %v, want %v", err, tc.wantErr)
+			}
+
 			diff := cmp.Diff(tc.wantPairs, got)
 			if diff != "" {
 				t.Fatalf("%s", diff)
@@ -135,6 +146,29 @@ func TestMarketService_GetSwapPairsIsolatesBranchExceptions(t *testing.T) {
 	want := []*models.LinkedPairs{
 		{Pairs: []models.Pair{{Symbol: "AAA-WWW"}, {Symbol: "WWW-XXX"}, {Symbol: "BBB-XXX"}, {Symbol: "BBB-DDD"}}},
 		{Pairs: []models.Pair{{Symbol: "AAA-WWW"}, {Symbol: "WWW-XXX"}, {Symbol: "CCC-XXX"}, {Symbol: "CCC-DDD"}}},
+	}
+
+	got, err := ms.GetAllSwapPairs("AAA-DDD")
+	if err != nil {
+		t.Fatalf("get swap pairs: %v", err)
+	}
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("swap pairs mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestMarketService_GetSwapPairsKeepsLongerAlternativesWithDirectPath(t *testing.T) {
+	ms := MarketService{
+		Markets: map[models.Symbol]*models.MarketPair{
+			"AAA-BBB": {Symbol: "AAA-BBB", Base: "AAA", Quote: "BBB", TradingEnabled: true},
+			"AAA-DDD": {Symbol: "AAA-DDD", Base: "AAA", Quote: "DDD", TradingEnabled: true},
+			"BBB-DDD": {Symbol: "BBB-DDD", Base: "BBB", Quote: "DDD", TradingEnabled: true},
+		},
+	}
+	want := []*models.LinkedPairs{
+		{Pairs: []models.Pair{{Symbol: "AAA-DDD"}}},
+		{Pairs: []models.Pair{{Symbol: "AAA-BBB"}, {Symbol: "BBB-DDD"}}},
 	}
 
 	got, err := ms.GetAllSwapPairs("AAA-DDD")

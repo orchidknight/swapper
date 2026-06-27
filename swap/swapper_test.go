@@ -1,6 +1,7 @@
 package swap
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -43,6 +44,64 @@ func TestSwapper_AllSwapStepsFiltersEmptyPairs(t *testing.T) {
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Fatalf("swap steps mismatch (-want +got):\n%s", diff)
 	}
+}
+
+func TestSwapper_ConsumeOrderDoesNotTruncateWhenMarketMetadataMissing(t *testing.T) {
+	amount := mustDecimal(t, "1.23456789")
+	swapper := NewSwapper(&staticMarketProvider{
+		swapPairs: []*models.LinkedPairs{{Pairs: []models.Pair{{Symbol: "BTC-USDT"}}}},
+	}, &MockedStorage{}, NewLogMock())
+
+	report, err := swapper.ConsumeOrder(context.Background(), &models.Order{
+		ID:              1,
+		Status:          models.OrderStatusNew,
+		Type:            models.OrderTypeSwap,
+		Symbol:          "BTC-USDT",
+		Side:            models.SideSell,
+		Amount:          amount,
+		AvailableAmount: amount,
+	})
+	if err != nil {
+		t.Fatalf("consume order: %v", err)
+	}
+
+	// GetMarket returns nil here: precision is unknown, so the amount must be
+	// passed through untouched instead of being truncated to whole units.
+	if !report.SubOrderToSend.Amount.Equal(amount) {
+		t.Fatalf("suborder amount mismatch: got %s, want %s", report.SubOrderToSend.Amount, amount)
+	}
+	if !report.SubOrderToSend.AvailableAmount.Equal(amount) {
+		t.Fatalf("suborder available amount mismatch: got %s, want %s", report.SubOrderToSend.AvailableAmount, amount)
+	}
+}
+
+func TestNewSwapperUsesNoOpPortsForNilStorageAndLogger(t *testing.T) {
+	swapper := NewSwapper(&staticMarketProvider{
+		swapPairs: []*models.LinkedPairs{{Pairs: []models.Pair{{Symbol: "BTC-USDT"}}}},
+	}, nil, nil)
+
+	report, err := swapper.ConsumeOrder(context.Background(), &models.Order{
+		ID:              1,
+		Status:          models.OrderStatusNew,
+		Type:            models.OrderTypeSwap,
+		Symbol:          "BTC-USDT",
+		Side:            models.SideSell,
+		Amount:          decimal.NewFromInt(1),
+		AvailableAmount: decimal.NewFromInt(1),
+	})
+	if err != nil {
+		t.Fatalf("consume order: %v", err)
+	}
+	if report == nil || report.SubOrderToSend == nil {
+		t.Fatalf("expected suborder report, got %v", report)
+	}
+}
+
+func TestSwapper_AllSwapStepsRejectsNilMarketProvider(t *testing.T) {
+	swapper := NewSwapper(nil, nil, nil)
+
+	_, err := swapper.AllSwapSteps(&models.Order{Symbol: "BTC-USDT"})
+	assertError(t, err, "market provider is nil")
 }
 
 func orderEquals(got, want *models.Order) error {
